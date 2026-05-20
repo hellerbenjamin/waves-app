@@ -3,12 +3,14 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreTrackRequest;
+use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Filesystem\AwsS3V3Adapter;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -54,6 +56,7 @@ class TrackController extends Controller
                 'mime' => $track->mime,
                 'duration_seconds' => $track->duration_seconds,
                 'peaks' => $track->peaks,
+                'channel_labels' => $track->channel_labels,
                 'peaks_ready' => $track->peaks !== null,
                 'created_at' => $track->created_at?->toIso8601String(),
                 'stream_url' => route('tracks.stream', $track->id),
@@ -62,6 +65,20 @@ class TrackController extends Controller
                 'streams_same_origin' => $this->diskDriver() !== 's3',
             ],
         ]);
+    }
+
+    public function update(UpdateTrackRequest $request, Track $track): JsonResponse
+    {
+        // Normalise blank entries to null and drop any beyond the channel count.
+        $channels = count($track->peaks['channels'] ?? []);
+        $labels = collect($request->validated('channel_labels'))
+            ->take($channels)
+            ->map(fn ($label) => filled(trim((string) $label)) ? trim((string) $label) : null)
+            ->all();
+
+        $track->update(['channel_labels' => $labels]);
+
+        return response()->json(['channel_labels' => $track->channel_labels]);
     }
 
     public function stream(Track $track): SymfonyResponse

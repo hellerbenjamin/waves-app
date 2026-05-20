@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Casts\Attribute;
-use Illuminate\Database\Eloquent\Concerns\HasUlids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -20,11 +19,13 @@ class Track extends Model
         'size',
         'content_hash',
         'peaks',
+        'channel_labels',
         'duration_seconds',
     ];
 
     protected $casts = [
         'peaks' => 'array',
+        'channel_labels' => 'array',
         'size' => 'integer',
         'duration_seconds' => 'float',
     ];

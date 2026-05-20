@@ -20,10 +20,11 @@ const currentTime = ref(0);
 const loadError = ref(null);
 
 // Per-channel mixer state. `levels` is 0–100 (%), `pans` is -100 (L) to 100 (R),
-// `muted` toggles each channel.
+// `muted` toggles each channel, `labels` are user-supplied channel names.
 const levels = ref([]);
 const pans = ref([]);
 const muted = ref([]);
+const labels = ref([]);
 const mixerUnavailable = ref(false);
 
 let ws = null;
@@ -102,6 +103,7 @@ const setupMixer = (audioEl, channels) => {
         levels.value = Array(channels).fill(100);
         pans.value = Array(channels).fill(0);
         muted.value = Array(channels).fill(false);
+        labels.value = Array.from({ length: channels }, (_, i) => props.track.channel_labels?.[i] ?? '');
     } catch (e) {
         // A tainted (cross-origin) media source throws here; fall back to plain
         // playback without per-channel control.
@@ -133,6 +135,35 @@ const resetPan = (i) => {
 };
 
 const panLabel = (v) => (v === 0 ? 'C' : v < 0 ? `L${-v}` : `R${v}`);
+
+const labelsStatus = ref(''); // '' | 'saving' | 'saved'
+let savedTimer = null;
+
+const saveLabels = async () => {
+    labelsStatus.value = 'saving';
+    try {
+        const res = await fetch(route('tracks.update', props.track.id), {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+            },
+            body: JSON.stringify({
+                channel_labels: labels.value.map((l) => l.trim() || null),
+            }),
+        });
+        if (!res.ok) throw new Error(`save failed (${res.status})`);
+
+        labelsStatus.value = 'saved';
+        clearTimeout(savedTimer);
+        savedTimer = setTimeout(() => { labelsStatus.value = ''; }, 1500);
+    } catch (e) {
+        labelsStatus.value = '';
+    }
+};
 
 const initWaveform = () => {
     if (ws || !waveformEl.value) return;
@@ -203,6 +234,7 @@ watch(() => props.track.peaks_ready, (ready) => {
 
 onBeforeUnmount(() => {
     clearInterval(pollTimer);
+    clearTimeout(savedTimer);
     ws?.destroy();
     ws = null;
     audioCtx?.close();
@@ -210,6 +242,7 @@ onBeforeUnmount(() => {
     gainNodes = [];
     panners = [];
     pans.value = [];
+    labels.value = [];
 });
 </script>
 
@@ -270,7 +303,13 @@ onBeforeUnmount(() => {
 
             <Card v-if="track.peaks_ready && levels.length">
                 <template #title>
-                    <span class="mixer-title">Channel mixer</span>
+                    <div class="mixer-header">
+                        <span class="mixer-title">Channel mixer</span>
+                        <span class="mixer-status" :class="{ visible: labelsStatus }">
+                            <template v-if="labelsStatus === 'saving'">Saving…</template>
+                            <template v-else-if="labelsStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
+                        </span>
+                    </div>
                 </template>
                 <template #content>
                     <div class="mixer">
@@ -294,7 +333,15 @@ onBeforeUnmount(() => {
                                 :aria-label="`Mute ${channelLabel(i, levels.length)}`"
                                 @click="toggleMute(i)"
                             />
-                            <span class="fader-label">{{ channelLabel(i, levels.length) }}</span>
+                            <input
+                                v-model="labels[i]"
+                                class="fader-label-input"
+                                :placeholder="channelLabel(i, levels.length)"
+                                maxlength="60"
+                                :aria-label="`Label for ${channelLabel(i, levels.length)}`"
+                                @blur="saveLabels"
+                                @keyup.enter="$event.target.blur()"
+                            />
 
                             <div class="pan">
                                 <Slider
@@ -369,13 +416,30 @@ onBeforeUnmount(() => {
 .processing-title { margin: 0; font-weight: 600; color: var(--p-text-color); }
 .processing-sub { margin: 0.125rem 0 0; font-size: 0.875rem; }
 
+.mixer-header { display: flex; align-items: center; gap: 0.75rem; }
 .mixer-title { font-size: 1rem; font-weight: 600; }
+.mixer-status { font-size: 0.8125rem; color: var(--p-text-muted-color); opacity: 0; transition: opacity 0.2s; display: inline-flex; align-items: center; gap: 0.25rem; }
+.mixer-status.visible { opacity: 1; }
 .mixer { display: flex; flex-wrap: wrap; gap: 1.25rem; padding-top: 0.25rem; }
 .fader { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 4rem; }
 .fader.muted { opacity: 0.65; }
 .fader-val { font-size: 0.8125rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
 .fader-slider { height: 150px; }
-.fader-label { font-size: 0.8125rem; font-weight: 600; }
+.fader-label-input {
+    width: 100%;
+    text-align: center;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--p-text-color);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 0.125rem 0.25rem;
+    transition: border-color 0.15s, background 0.15s;
+}
+.fader-label-input::placeholder { color: var(--p-text-muted-color); font-weight: 600; }
+.fader-label-input:hover { border-color: var(--p-content-border-color); }
+.fader-label-input:focus { outline: none; border-color: var(--p-primary-color); background: var(--p-content-background); }
 .pan { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; width: 100%; margin-top: 0.25rem; }
 .pan-slider { width: 100%; }
 .pan-val { background: none; border: none; padding: 0; cursor: pointer; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }

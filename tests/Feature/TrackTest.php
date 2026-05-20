@@ -78,6 +78,43 @@ class TrackTest extends TestCase
             );
     }
 
+    public function test_update_403s_for_other_users_track(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for(User::factory())->withPeaks()->create();
+
+        $this->actingAs($user)
+            ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['Kick']])
+            ->assertForbidden();
+    }
+
+    public function test_update_persists_and_normalises_channel_labels(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->create([
+            'peaks' => ['channels' => [[0.1, -0.1], [0.2, -0.2]], 'sample_rate' => 44100],
+            'duration_seconds' => 10.0,
+        ]);
+
+        $this->actingAs($user)
+            ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['  Kick  ', '']])
+            ->assertOk()
+            ->assertExactJson(['channel_labels' => ['Kick', null]]);
+
+        $this->assertSame(['Kick', null], $track->fresh()->channel_labels);
+    }
+
+    public function test_update_rejects_more_labels_than_channels(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->withPeaks()->create(); // 1 channel
+
+        $this->actingAs($user)
+            ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['a', 'b']])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('channel_labels');
+    }
+
     public function test_stream_403s_for_other_users_track(): void
     {
         $user = User::factory()->create();
