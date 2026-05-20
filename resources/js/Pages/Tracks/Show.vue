@@ -19,14 +19,17 @@ const isReady = ref(false);
 const currentTime = ref(0);
 const loadError = ref(null);
 
-// Per-channel mixer state. `levels` is 0–100 (%), `muted` toggles each channel.
+// Per-channel mixer state. `levels` is 0–100 (%), `pans` is -100 (L) to 100 (R),
+// `muted` toggles each channel.
 const levels = ref([]);
+const pans = ref([]);
 const muted = ref([]);
 const mixerUnavailable = ref(false);
 
 let ws = null;
 let audioCtx = null;
 let gainNodes = [];
+let panners = [];
 let pollTimer = null;
 
 const channelCount = () => props.track.peaks?.channels?.length ?? 0;
@@ -57,9 +60,13 @@ const cssVar = (name, fallback) => {
     return v || fallback;
 };
 
-// Split the media element into one gain-controlled lane per channel, then merge
-// back to the output. A plain <audio> element only exposes a single master
-// volume, so per-channel faders require the Web Audio graph.
+// Split the media element into one gain-controlled lane per channel, then fold
+// every channel down into the stereo output. A plain <audio> element only
+// exposes a single master volume, so per-channel faders require the Web Audio
+// graph. Each lane runs through a (currently centered) StereoPanner so all
+// channels reach both L and R — merging into a >2-channel bus would let the
+// stereo destination drop everything past the first two. Per-channel panning
+// is a later step: the panner nodes are already in place for it.
 const setupMixer = (audioEl, channels) => {
     const Ctx = window.AudioContext || window.webkitAudioContext;
 
@@ -74,21 +81,26 @@ const setupMixer = (audioEl, channels) => {
         audioCtx = new Ctx();
         const source = audioCtx.createMediaElementSource(audioEl);
         const splitter = audioCtx.createChannelSplitter(channels);
-        const merger = audioCtx.createChannelMerger(channels);
 
         source.connect(splitter);
 
         for (let i = 0; i < channels; i++) {
             const gain = audioCtx.createGain();
             gain.gain.value = 1;
+
+            const panner = audioCtx.createStereoPanner();
+            panner.pan.value = 0; // centered for now; per-channel pan comes later
+
             splitter.connect(gain, i, 0);
-            gain.connect(merger, 0, i);
+            gain.connect(panner);
+            panner.connect(audioCtx.destination);
+
             gainNodes.push(gain);
+            panners.push(panner);
         }
 
-        merger.connect(audioCtx.destination);
-
         levels.value = Array(channels).fill(100);
+        pans.value = Array(channels).fill(0);
         muted.value = Array(channels).fill(false);
     } catch (e) {
         // A tainted (cross-origin) media source throws here; fall back to plain
@@ -108,6 +120,19 @@ const toggleMute = (i) => {
     muted.value[i] = !muted.value[i];
     applyGain(i);
 };
+
+const applyPan = (i) => {
+    const node = panners[i];
+    if (!node || !audioCtx) return;
+    node.pan.setTargetAtTime(pans.value[i] / 100, audioCtx.currentTime, 0.01);
+};
+
+const resetPan = (i) => {
+    pans.value[i] = 0;
+    applyPan(i);
+};
+
+const panLabel = (v) => (v === 0 ? 'C' : v < 0 ? `L${-v}` : `R${v}`);
 
 const initWaveform = () => {
     if (ws || !waveformEl.value) return;
@@ -183,6 +208,8 @@ onBeforeUnmount(() => {
     audioCtx?.close();
     audioCtx = null;
     gainNodes = [];
+    panners = [];
+    pans.value = [];
 });
 </script>
 
@@ -268,6 +295,20 @@ onBeforeUnmount(() => {
                                 @click="toggleMute(i)"
                             />
                             <span class="fader-label">{{ channelLabel(i, levels.length) }}</span>
+
+                            <div class="pan">
+                                <Slider
+                                    v-model="pans[i]"
+                                    :min="-100"
+                                    :max="100"
+                                    class="pan-slider"
+                                    :aria-label="`Pan ${channelLabel(i, levels.length)}`"
+                                    @update:model-value="applyPan(i)"
+                                />
+                                <button type="button" class="pan-val" title="Double-click to center" @dblclick="resetPan(i)">
+                                    {{ panLabel(pans[i]) }}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </template>
@@ -335,6 +376,10 @@ onBeforeUnmount(() => {
 .fader-val { font-size: 0.8125rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
 .fader-slider { height: 150px; }
 .fader-label { font-size: 0.8125rem; font-weight: 600; }
+.pan { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; width: 100%; margin-top: 0.25rem; }
+.pan-slider { width: 100%; }
+.pan-val { background: none; border: none; padding: 0; cursor: pointer; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
+.pan-val:hover { color: var(--p-text-color); }
 
 .meta { margin: 0; display: grid; gap: 0.875rem; }
 .meta-row { display: flex; justify-content: space-between; align-items: center; }
