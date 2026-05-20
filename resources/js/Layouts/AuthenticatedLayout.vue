@@ -11,6 +11,7 @@ const userMenu = ref(null);
 
 const navItems = [
     { label: 'Dashboard', icon: 'pi pi-home', command: () => router.visit(route('dashboard')) },
+    { label: 'Tracks', icon: 'pi pi-list', command: () => router.visit(route('tracks.index')) },
 ];
 
 const userMenuItems = [
