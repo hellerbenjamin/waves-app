@@ -138,6 +138,22 @@ const panLabel = (v) => (v === 0 ? 'C' : v < 0 ? `L${-v}` : `R${v}`);
 
 const labelsStatus = ref(''); // '' | 'saving' | 'saved'
 let savedTimer = null;
+let labelInputs = [];
+
+const setLabelRef = (el, i) => {
+    if (el) labelInputs[i] = el;
+};
+
+// Tab/Shift+Tab jumps straight to the adjacent channel label, skipping the
+// faders and pan controls in between. At the ends, fall back to normal Tab.
+const focusAdjacentLabel = (event, i) => {
+    const next = labelInputs[i + (event.shiftKey ? -1 : 1)];
+    if (next) {
+        event.preventDefault();
+        next.focus();
+        next.select();
+    }
+};
 
 const saveLabels = async () => {
     labelsStatus.value = 'saving';
@@ -243,6 +259,7 @@ onBeforeUnmount(() => {
     panners = [];
     pans.value = [];
     labels.value = [];
+    labelInputs = [];
 });
 </script>
 
@@ -336,6 +353,7 @@ onBeforeUnmount(() => {
                             />
                             <div class="label-field">
                                 <input
+                                    :ref="(el) => setLabelRef(el, i)"
                                     v-model="labels[i]"
                                     class="fader-label-input"
                                     :placeholder="channelLabel(i, levels.length)"
@@ -343,6 +361,7 @@ onBeforeUnmount(() => {
                                     :aria-label="`Label for ${channelLabel(i, levels.length)}`"
                                     @blur="saveLabels"
                                     @keyup.enter="$event.target.blur()"
+                                    @keydown.tab="focusAdjacentLabel($event, i)"
                                 />
                                 <i class="pi pi-pencil label-edit-icon" />
                             </div>
