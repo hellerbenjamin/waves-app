@@ -312,6 +312,7 @@ onBeforeUnmount(() => {
                     </div>
                 </template>
                 <template #content>
+                    <p class="mixer-hint"><i class="pi pi-pencil" /> Click a channel name to rename it</p>
                     <div class="mixer">
                         <div v-for="(lvl, i) in levels" :key="i" class="fader" :class="{ muted: muted[i] }">
                             <span class="fader-val">{{ muted[i] ? '—' : `${lvl}%` }}</span>
@@ -333,15 +334,18 @@ onBeforeUnmount(() => {
                                 :aria-label="`Mute ${channelLabel(i, levels.length)}`"
                                 @click="toggleMute(i)"
                             />
-                            <input
-                                v-model="labels[i]"
-                                class="fader-label-input"
-                                :placeholder="channelLabel(i, levels.length)"
-                                maxlength="60"
-                                :aria-label="`Label for ${channelLabel(i, levels.length)}`"
-                                @blur="saveLabels"
-                                @keyup.enter="$event.target.blur()"
-                            />
+                            <div class="label-field">
+                                <input
+                                    v-model="labels[i]"
+                                    class="fader-label-input"
+                                    :placeholder="channelLabel(i, levels.length)"
+                                    maxlength="60"
+                                    :aria-label="`Label for ${channelLabel(i, levels.length)}`"
+                                    @blur="saveLabels"
+                                    @keyup.enter="$event.target.blur()"
+                                />
+                                <i class="pi pi-pencil label-edit-icon" />
+                            </div>
 
                             <div class="pan">
                                 <Slider
@@ -421,25 +425,49 @@ onBeforeUnmount(() => {
 .mixer-status { font-size: 0.8125rem; color: var(--p-text-muted-color); opacity: 0; transition: opacity 0.2s; display: inline-flex; align-items: center; gap: 0.25rem; }
 .mixer-status.visible { opacity: 1; }
 .mixer { display: flex; flex-wrap: wrap; gap: 1.25rem; padding-top: 0.25rem; }
-.fader { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 4rem; }
+.fader { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 4.75rem; }
 .fader.muted { opacity: 0.65; }
 .fader-val { font-size: 0.8125rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
 .fader-slider { height: 150px; }
+.label-field { position: relative; width: 100%; }
 .fader-label-input {
     width: 100%;
     text-align: center;
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--p-text-color);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 0.125rem 0.25rem;
-    transition: border-color 0.15s, background 0.15s;
+    background: var(--p-content-background);
+    border: 1px solid var(--p-content-border-color);
+    border-radius: 6px;
+    padding: 0.3rem 1rem;
+    transition: border-color 0.15s, box-shadow 0.15s;
 }
-.fader-label-input::placeholder { color: var(--p-text-muted-color); font-weight: 600; }
-.fader-label-input:hover { border-color: var(--p-content-border-color); }
-.fader-label-input:focus { outline: none; border-color: var(--p-primary-color); background: var(--p-content-background); }
+.fader-label-input::placeholder { color: var(--p-text-muted-color); font-weight: 500; font-style: italic; }
+.fader-label-input:hover { border-color: var(--p-primary-color); }
+.fader-label-input:focus {
+    outline: none;
+    border-color: var(--p-primary-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--p-primary-color) 25%, transparent);
+}
+.label-edit-icon {
+    position: absolute;
+    right: 0.4rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.6875rem;
+    color: var(--p-text-muted-color);
+    pointer-events: none;
+    transition: color 0.15s;
+}
+.fader-label-input:focus + .label-edit-icon { color: var(--p-primary-color); }
+.mixer-hint {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    margin: 0 0 1rem;
+    font-size: 0.8125rem;
+    color: var(--p-text-muted-color);
+}
 .pan { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; width: 100%; margin-top: 0.25rem; }
 .pan-slider { width: 100%; }
 .pan-val { background: none; border: none; padding: 0; cursor: pointer; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
