@@ -16,7 +16,11 @@ return Application::configure(basePath: dirname(__DIR__))
             \Illuminate\Http\Middleware\AddLinkHeadersForPreloadedAssets::class,
         ]);
 
-        //
+        // Local track uploads PUT raw file bodies and are protected by a
+        // signed URL instead of a CSRF token.
+        $middleware->validateCsrfTokens(except: [
+            'tracks/upload',
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //

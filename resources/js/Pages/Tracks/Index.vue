@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue';
-import { Head, router, useForm } from '@inertiajs/vue3';
+import { Head, Link, router, useForm } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import DataTable from 'primevue/datatable';
 import Column from 'primevue/column';
@@ -167,7 +167,11 @@ const confirmDelete = (track) => {
             <Card v-else>
                 <template #content>
                     <DataTable :value="tracks" stripedRows>
-                        <Column field="name" header="Name" />
+                        <Column header="Name">
+                            <template #body="{ data }">
+                                <Link :href="route('tracks.show', data.id)" class="track-link">{{ data.name }}</Link>
+                            </template>
+                        </Column>
                         <Column header="Status">
                             <template #body="{ data }">
                                 <Tag v-if="data.peaks_ready" severity="success" value="Ready" />
@@ -199,4 +203,6 @@ const confirmDelete = (track) => {
 .upload-list { display: flex; flex-direction: column; gap: 0.875rem; }
 .upload-row { display: flex; flex-direction: column; gap: 0.375rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
+.track-link { color: var(--p-primary-color); text-decoration: none; font-weight: 500; }
+.track-link:hover { text-decoration: underline; }
 </style>

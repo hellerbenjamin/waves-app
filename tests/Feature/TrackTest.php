@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
 use App\Models\User;
+use Illuminate\Filesystem\AwsS3V3Adapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Storage;
@@ -46,6 +47,75 @@ class TrackTest extends TestCase
                 ->where('tracks.0.id', $mine->id)
                 ->where('tracks.0.name', 'mine.wav')
             );
+    }
+
+    public function test_show_403s_for_other_users_track(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for(User::factory())->create();
+
+        $this->actingAs($user)
+            ->get("/tracks/{$track->id}")
+            ->assertForbidden();
+    }
+
+    public function test_show_renders_track_with_stream_url(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->withPeaks()->create(['original_name' => 'mix.wav']);
+
+        $this->actingAs($user)
+            ->get("/tracks/{$track->id}")
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->component('Tracks/Show')
+                ->where('track.id', $track->id)
+                ->where('track.name', 'mix.wav')
+                ->where('track.peaks_ready', true)
+                ->where('track.stream_url', route('tracks.stream', $track->id))
+                ->where('track.streams_same_origin', false) // s3 disk in tests
+                ->has('track.peaks.channels')
+            );
+    }
+
+    public function test_stream_403s_for_other_users_track(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for(User::factory())->create();
+
+        $this->actingAs($user)
+            ->get("/tracks/{$track->id}/stream")
+            ->assertForbidden();
+    }
+
+    public function test_stream_redirects_to_temporary_url_on_s3(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->create();
+
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-stream');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->actingAs($user)
+            ->get("/tracks/{$track->id}/stream")
+            ->assertRedirect('https://s3.example/signed-stream');
+    }
+
+    public function test_stream_serves_file_on_local_disk(): void
+    {
+        config(['filesystems.tracks_disk' => 'local']);
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $key = "users/{$user->id}/play.wav";
+        Storage::disk('local')->put($key, 'RIFF....WAVEfake');
+        $track = Track::factory()->for($user)->create(['s3_key' => $key, 'mime' => 'audio/wav']);
+
+        $response = $this->actingAs($user)->get("/tracks/{$track->id}/stream");
+
+        $response->assertOk();
+        $this->assertSame('audio/wav', $response->headers->get('Content-Type'));
     }
 
     public function test_upload_url_rejects_non_wav_filename(): void
@@ -94,7 +164,7 @@ class TrackTest extends TestCase
     {
         $user = User::factory()->create();
 
-        $disk = Mockery::mock(\Illuminate\Filesystem\AwsS3V3Adapter::class);
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
         $disk->shouldReceive('temporaryUploadUrl')
             ->once()
             ->andReturn([

@@ -17,6 +17,19 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Track Storage Disk
+    |--------------------------------------------------------------------------
+    |
+    | Disk used for uploaded audio tracks. Defaults to "s3" (direct presigned
+    | uploads). Set TRACKS_DISK=local to store files on the local filesystem
+    | via an app-side upload endpoint — useful for development without S3.
+    |
+    */
+
+    'tracks_disk' => env('TRACKS_DISK', 's3'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Filesystem Disks
     |--------------------------------------------------------------------------
     |
