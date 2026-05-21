@@ -90,9 +90,40 @@ class TrackTest extends TestCase
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['  Kick  ', '']])
             ->assertOk()
-            ->assertExactJson(['channel_labels' => ['Kick', null]]);
+            ->assertExactJson(['channel_labels' => ['Kick', null], 'name' => $track->original_name]);
 
         $this->assertSame(['Kick', null], $track->fresh()->channel_labels);
+    }
+
+    public function test_update_renames_track_without_clearing_labels(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->create([
+            'original_name' => 'old.wav',
+            'channel_labels' => ['Kick', 'Snare'],
+            'peaks' => ['channels' => [[0.1, -0.1], [0.2, -0.2]], 'sample_rate' => 44100],
+            'duration_seconds' => 10.0,
+        ]);
+
+        $this->actingAs($user)
+            ->patchJson("/tracks/{$track->id}", ['original_name' => '  My Mix  '])
+            ->assertOk()
+            ->assertExactJson(['channel_labels' => ['Kick', 'Snare'], 'name' => 'My Mix']);
+
+        $fresh = $track->fresh();
+        $this->assertSame('My Mix', $fresh->original_name);
+        $this->assertSame(['Kick', 'Snare'], $fresh->channel_labels);
+    }
+
+    public function test_update_rejects_blank_rename(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->withPeaks()->create();
+
+        $this->actingAs($user)
+            ->patchJson("/tracks/{$track->id}", ['original_name' => '   '])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('original_name');
     }
 
     public function test_update_rejects_more_labels_than_channels(): void

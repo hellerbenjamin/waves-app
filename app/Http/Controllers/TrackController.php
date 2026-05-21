@@ -7,14 +7,11 @@ use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
-use Illuminate\Contracts\Filesystem\Filesystem;
-use Illuminate\Filesystem\AwsS3V3Adapter;
+use App\Services\TrackStorage;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -23,6 +20,8 @@ use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 class TrackController extends Controller
 {
     use AuthorizesRequests;
+
+    public function __construct(private TrackStorage $storage) {}
 
     public function index(Request $request): Response
     {
@@ -92,47 +91,42 @@ class TrackController extends Controller
 
     public function update(UpdateTrackRequest $request, Track $track): JsonResponse
     {
-        // Normalise blank entries to null and drop any beyond the channel count.
-        $channels = count($track->peaks['channels'] ?? []);
-        $labels = collect($request->validated('channel_labels'))
-            ->take($channels)
-            ->map(fn ($label) => filled(trim((string) $label)) ? trim((string) $label) : null)
-            ->all();
+        $data = $request->validated();
+        $changes = [];
 
-        $track->update(['channel_labels' => $labels]);
+        // Only touch fields the request actually sent — a rename must not clear
+        // labels, and a label save must not blank the name.
+        if (array_key_exists('original_name', $data)) {
+            $changes['original_name'] = trim($data['original_name']);
+        }
 
-        return response()->json(['channel_labels' => $track->channel_labels]);
+        if (array_key_exists('channel_labels', $data)) {
+            // Normalise blank entries to null and drop any beyond the channel count.
+            $channels = count($track->peaks['channels'] ?? []);
+            $changes['channel_labels'] = collect($data['channel_labels'])
+                ->take($channels)
+                ->map(fn ($label) => filled(trim((string) $label)) ? trim((string) $label) : null)
+                ->all();
+        }
+
+        $track->update($changes);
+
+        return response()->json([
+            'name' => $track->original_name,
+            'channel_labels' => $track->channel_labels,
+        ]);
     }
 
     public function stream(Track $track): SymfonyResponse
     {
         $this->authorize('view', $track);
 
-        return $this->serveAudio($track);
+        return $this->storage->streamResponse($track);
     }
 
     public function streamShared(Track $track): SymfonyResponse
     {
-        return $this->serveAudio($track);
-    }
-
-    private function serveAudio(Track $track): SymfonyResponse
-    {
-        // S3 streams (and seeks) directly from a short-lived signed URL; local
-        // disks are served through a range-aware file response for scrubbing.
-        if ($this->diskDriver() === 's3') {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl($track->s3_key, now()->addMinutes(30)));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($track->s3_key), 404);
-
-        return response()->file($disk->path($track->s3_key), [
-            'Content-Type' => $track->mime ?: 'audio/wav',
-        ]);
+        return $this->storage->streamResponse($track);
     }
 
     /**
@@ -151,45 +145,17 @@ class TrackController extends Controller
             'peaks_ready' => $track->peaks !== null,
             'created_at' => $track->created_at?->toIso8601String(),
             'stream_url' => $streamUrl,
-            // Per-channel mixing needs a CORS-clean (same-origin) source; the S3
-            // branch redirects off-origin, which taints Web Audio.
-            'streams_same_origin' => $this->diskDriver() !== 's3',
+            // Per-channel mixing needs a CORS-clean (same-origin) source.
+            'streams_same_origin' => $this->storage->streamsSameOrigin(),
         ];
     }
 
     public function uploadUrl(UploadUrlRequest $request): array
     {
-        $userId = $request->user()->id;
-        $key = "users/{$userId}/".(string) Str::ulid().'.wav';
-
-        // Local disks can't mint presigned upload URLs, so point the browser
-        // at a signed app endpoint that streams the body to disk instead.
-        if ($this->diskDriver() !== 's3') {
-            return [
-                'url' => URL::temporarySignedRoute(
-                    'tracks.upload-put',
-                    now()->addMinutes(15),
-                    ['key' => $key],
-                ),
-                'headers' => [],
-                's3_key' => $key,
-            ];
-        }
-
-        /** @var AwsS3V3Adapter $disk */
-        $disk = Storage::disk('s3');
-
-        $signed = $disk->temporaryUploadUrl(
-            $key,
-            now()->addMinutes(15),
-            ['ContentType' => $request->validated('content_type')],
+        return $this->storage->uploadTarget(
+            $request->user(),
+            $request->validated('content_type'),
         );
-
-        return [
-            'url' => $signed['url'],
-            'headers' => $signed['headers'],
-            's3_key' => $key,
-        ];
     }
 
     public function uploadPut(Request $request): \Illuminate\Http\Response
@@ -201,17 +167,16 @@ class TrackController extends Controller
             403,
         );
 
-        $this->disk()->writeStream($key, $request->getContent(asResource: true));
+        $this->storage->put($key, $request->getContent(asResource: true));
 
         return response()->noContent();
     }
 
     public function store(StoreTrackRequest $request): RedirectResponse
     {
-        $disk = $this->disk();
         $key = $request->validated('s3_key');
 
-        abort_unless($disk->exists($key), 422, 'Upload not found in storage.');
+        abort_unless($this->storage->exists($key), 422, 'Upload not found in storage.');
 
         $track = $request->user()->tracks()->create([
             's3_key' => $key,
@@ -229,19 +194,9 @@ class TrackController extends Controller
     {
         $this->authorize('delete', $track);
 
-        $this->disk()->delete($track->s3_key);
+        $this->storage->delete($track->s3_key);
         $track->delete();
 
         return back();
-    }
-
-    private function disk(): Filesystem
-    {
-        return Storage::disk(config('filesystems.tracks_disk'));
-    }
-
-    private function diskDriver(): string
-    {
-        return (string) config('filesystems.disks.'.config('filesystems.tracks_disk').'.driver');
     }
 }

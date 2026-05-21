@@ -28,6 +28,10 @@ const isReady = ref(false);
 const currentTime = ref(0);
 const loadError = ref(null);
 
+// Local source of truth for the (editable) track name so the heading and the
+// document title update immediately on rename, without a full Inertia reload.
+const trackName = ref(props.track.name);
+
 // Per-channel mixer state. `levels` is 0–100 (%), `pans` is -100 (L) to 100 (R),
 // `muted` toggles each channel, `labels` are user-supplied channel names.
 const levels = ref([]);
@@ -201,6 +205,26 @@ const saveLabels = async () => {
     }
 };
 
+const saveName = async () => {
+    const name = trackName.value.trim();
+    // Ignore no-ops and empty names; snap the field back to the last good value.
+    if (!name || name === props.track.name) {
+        trackName.value = props.track.name;
+        return;
+    }
+    try {
+        const res = await apiFetch(route('tracks.update', props.track.id), {
+            method: 'PATCH',
+            body: { original_name: name },
+        });
+        if (!res.ok) throw new Error(`rename failed (${res.status})`);
+        props.track.name = (await res.json()).name;
+        trackName.value = props.track.name;
+    } catch (e) {
+        trackName.value = props.track.name;
+    }
+};
+
 // Apply a template's ordered labels onto this track's channels by index
 // (extra template entries are ignored, missing ones clear the channel).
 const applyTemplate = (template) => {
@@ -368,7 +392,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-    <Head :title="track.name" />
+    <Head :title="trackName" />
 
     <component :is="Layout">
         <template #header>
@@ -377,7 +401,18 @@ onBeforeUnmount(() => {
                     <i class="pi pi-arrow-left" />
                     <span>Tracks</span>
                 </Link>
-                <h2 class="page-title">{{ track.name }}</h2>
+                <div v-if="canEdit" class="title-field">
+                    <input
+                        v-model="trackName"
+                        class="page-title-input"
+                        maxlength="255"
+                        aria-label="Track name"
+                        @blur="saveName"
+                        @keyup.enter="$event.target.blur()"
+                    />
+                    <i class="pi pi-pencil title-edit-icon" />
+                </div>
+                <h2 v-else class="page-title">{{ trackName }}</h2>
                 <Tag v-if="!canEdit" value="Shared" severity="info" />
                 <Button
                     v-if="canEdit"
@@ -592,6 +627,38 @@ onBeforeUnmount(() => {
 <style scoped>
 .header-row { display: flex; align-items: center; gap: 1rem; }
 .page-title { font-size: 1.25rem; font-weight: 600; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title-field { position: relative; flex: 1; min-width: 0; max-width: 32rem; }
+.page-title-input {
+    width: 100%;
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--p-text-color);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0.25rem 1.75rem 0.25rem 0.5rem;
+    transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.page-title-input:hover { border-color: var(--p-content-border-color); }
+.page-title-input:focus {
+    outline: none;
+    background: var(--p-content-background);
+    border-color: var(--p-primary-color);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--p-primary-color) 25%, transparent);
+}
+.title-edit-icon {
+    position: absolute;
+    right: 0.5rem;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.75rem;
+    color: var(--p-text-muted-color);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.title-field:hover .title-edit-icon,
+.page-title-input:focus + .title-edit-icon { opacity: 1; }
 .back-link { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--p-text-muted-color); text-decoration: none; font-size: 0.875rem; }
 .back-link:hover { color: var(--p-text-color); }
 .stack { display: flex; flex-direction: column; gap: 1.5rem; }

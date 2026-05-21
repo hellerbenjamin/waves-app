@@ -16,7 +16,8 @@ class UpdateTrackRequest extends FormRequest
         $channels = count($this->route('track')->peaks['channels'] ?? []);
 
         return [
-            'channel_labels' => ['present', 'array', 'max:'.max($channels, 1)],
+            'original_name' => ['sometimes', 'required', 'string', 'max:255'],
+            'channel_labels' => ['sometimes', 'array', 'max:'.max($channels, 1)],
             'channel_labels.*' => ['nullable', 'string', 'max:60'],
         ];
     }

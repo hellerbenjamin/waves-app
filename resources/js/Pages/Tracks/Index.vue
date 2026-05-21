@@ -9,6 +9,8 @@ import Tag from 'primevue/tag';
 import ProgressBar from 'primevue/progressbar';
 import Card from 'primevue/card';
 import Message from 'primevue/message';
+import Dialog from 'primevue/dialog';
+import InputText from 'primevue/inputtext';
 import { useToast } from 'primevue/usetoast';
 import Toast from 'primevue/toast';
 import ConfirmDialog from 'primevue/confirmdialog';
@@ -128,6 +130,45 @@ const confirmDelete = (track) => {
         accept: () => router.delete(route('tracks.destroy', track.id), { preserveScroll: true }),
     });
 };
+
+// Rename uses the JSON update endpoint (not an Inertia visit), then refreshes
+// just the tracks prop so the table reflects the new name.
+const renameTarget = ref(null);
+const renameValue = ref('');
+const renameBusy = ref(false);
+const showRenameDialog = ref(false);
+
+const openRename = (track) => {
+    renameTarget.value = track;
+    renameValue.value = track.name;
+    showRenameDialog.value = true;
+};
+
+const submitRename = async () => {
+    const name = renameValue.value.trim();
+    if (!name || renameBusy.value) return;
+    renameBusy.value = true;
+    try {
+        const res = await fetch(route('tracks.update', renameTarget.value.id), {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+            },
+            body: JSON.stringify({ original_name: name }),
+        });
+        if (!res.ok) throw new Error(`rename failed (${res.status})`);
+        showRenameDialog.value = false;
+        router.reload({ only: ['tracks'], preserveScroll: true });
+    } catch (err) {
+        toast.add({ severity: 'error', summary: 'Rename failed', detail: err.message, life: 4000 });
+    } finally {
+        renameBusy.value = false;
+    }
+};
 </script>
 
 <template>
@@ -186,13 +227,25 @@ const confirmDelete = (track) => {
                         </Column>
                         <Column header="" style="width: 8rem; text-align: right">
                             <template #body="{ data }">
-                                <Button icon="pi pi-trash" severity="danger" text rounded @click="confirmDelete(data)" />
+                                <Button icon="pi pi-pencil" severity="secondary" text rounded aria-label="Rename" @click="openRename(data)" />
+                                <Button icon="pi pi-trash" severity="danger" text rounded aria-label="Delete" @click="confirmDelete(data)" />
                             </template>
                         </Column>
                     </DataTable>
                 </template>
             </Card>
         </div>
+
+        <Dialog v-model:visible="showRenameDialog" modal header="Rename track" :style="{ width: '26rem' }">
+            <div class="rename-dialog">
+                <label for="rename-name">Track name</label>
+                <InputText id="rename-name" v-model="renameValue" autofocus @keyup.enter="submitRename" />
+            </div>
+            <template #footer>
+                <Button label="Cancel" text @click="showRenameDialog = false" />
+                <Button label="Save" icon="pi pi-check" :loading="renameBusy" :disabled="!renameValue.trim()" @click="submitRename" />
+            </template>
+        </Dialog>
     </AuthenticatedLayout>
 </template>
 
@@ -205,4 +258,7 @@ const confirmDelete = (track) => {
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
 .track-link { color: var(--p-primary-color); text-decoration: none; font-weight: 500; }
 .track-link:hover { text-decoration: underline; }
+.rename-dialog { display: flex; flex-direction: column; gap: 0.5rem; }
+.rename-dialog label { font-size: 0.875rem; font-weight: 500; }
+.rename-dialog .p-inputtext { width: 100%; }
 </style>
