@@ -26,7 +26,7 @@ Route::middleware('auth')->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 });
 
-Route::middleware(['auth', 'verified'])->group(function () {
+Route::middleware('auth')->group(function () {
     Route::get('/tracks', [TrackController::class, 'index'])->name('tracks.index');
     Route::get('/tracks/{track}', [TrackController::class, 'show'])->name('tracks.show');
     Route::get('/tracks/{track}/stream', [TrackController::class, 'stream'])->name('tracks.stream');

@@ -21,15 +21,6 @@ class TrackTest extends TestCase
         $this->get('/tracks')->assertRedirect('/login');
     }
 
-    public function test_index_requires_verified_email(): void
-    {
-        $unverified = User::factory()->create(['email_verified_at' => null]);
-
-        $this->actingAs($unverified)
-            ->get('/tracks')
-            ->assertRedirect(route('verification.notice'));
-    }
-
     public function test_index_only_returns_current_users_tracks(): void
     {
         $user = User::factory()->create();
