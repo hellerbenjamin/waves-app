@@ -1,0 +1,8 @@
+# Exposes the Vite dev server (running inside the web container on 5173)
+# through ddev-router with TLS, so https://waves.ddev.site:5173 reaches it.
+# Run the dev server with: ddev npm run dev
+web_extra_exposed_ports:
+  - name: vite
+    container_port: 5173
+    http_port: 5172
+    https_port: 5173

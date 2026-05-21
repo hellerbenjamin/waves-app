@@ -18,6 +18,19 @@ export default defineConfig({
         }),
     ],
     server: {
+        // Runs inside the ddev web container; ddev-router exposes 5173 over TLS.
+        // `origin` is written verbatim into the hot file, so Laravel emits asset
+        // URLs the browser can actually reach over https.
+        host: '0.0.0.0',
+        port: 5173,
+        strictPort: true,
+        origin: 'https://waves.ddev.site:5173',
+        cors: true,
+        hmr: {
+            protocol: 'wss',
+            host: 'waves.ddev.site',
+            clientPort: 5173,
+        },
         watch: {
             ignored: [
                 '**/vendor/**',
