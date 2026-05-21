@@ -10,7 +10,6 @@ const page = usePage();
 const userMenu = ref(null);
 
 const navItems = [
-    { label: 'Dashboard', icon: 'pi pi-home', command: () => router.visit(route('dashboard')) },
     { label: 'Tracks', icon: 'pi pi-list', command: () => router.visit(route('tracks.index')) },
 ];
 
@@ -27,7 +26,7 @@ const initials = (name) => name?.split(' ').map(w => w[0]).slice(0, 2).join('').
     <div class="app-shell">
         <Menubar :model="navItems" class="app-nav">
             <template #start>
-                <Link :href="route('dashboard')" class="brand">Waves</Link>
+                <Link :href="route('tracks.index')" class="brand">Waves</Link>
             </template>
             <template #end>
                 <Button text @click="(e) => userMenu.toggle(e)" :aria-label="page.props.auth.user.name" aria-haspopup="true" aria-controls="user-menu">

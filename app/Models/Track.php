@@ -21,6 +21,7 @@ class Track extends Model
         'peaks',
         'channel_labels',
         'duration_seconds',
+        'share_token',
     ];
 
     protected $casts = [

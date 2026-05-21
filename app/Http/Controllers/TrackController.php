@@ -44,27 +44,50 @@ class TrackController extends Controller
         ]);
     }
 
-    public function show(Track $track): Response
+    public function show(Request $request, Track $track): Response
     {
         $this->authorize('view', $track);
 
         return Inertia::render('Tracks/Show', [
-            'track' => [
-                'id' => $track->id,
-                'name' => $track->original_name,
-                'size' => $track->size,
-                'mime' => $track->mime,
-                'duration_seconds' => $track->duration_seconds,
-                'peaks' => $track->peaks,
-                'channel_labels' => $track->channel_labels,
-                'peaks_ready' => $track->peaks !== null,
-                'created_at' => $track->created_at?->toIso8601String(),
-                'stream_url' => route('tracks.stream', $track->id),
-                // Per-channel mixing needs a CORS-clean (same-origin) source;
-                // the S3 branch redirects off-origin, which taints Web Audio.
-                'streams_same_origin' => $this->diskDriver() !== 's3',
-            ],
+            'canEdit' => true,
+            'templates' => $request->user()
+                ->channelTemplates()
+                ->latest()
+                ->get(['id', 'name', 'labels']),
+            'track' => array_merge(
+                $this->trackProps($track, route('tracks.stream', $track->id)),
+                ['share_url' => $track->share_token ? route('tracks.shared', $track->share_token) : null],
+            ),
         ]);
+    }
+
+    public function showShared(Track $track): Response
+    {
+        return Inertia::render('Tracks/Show', [
+            'canEdit' => false,
+            'templates' => [],
+            'track' => $this->trackProps($track, route('tracks.shared-stream', $track->share_token)),
+        ]);
+    }
+
+    public function share(Request $request, Track $track): JsonResponse
+    {
+        $this->authorize('update', $track);
+
+        if (! $track->share_token) {
+            $track->update(['share_token' => Str::random(32)]);
+        }
+
+        return response()->json(['share_url' => route('tracks.shared', $track->share_token)]);
+    }
+
+    public function unshare(Request $request, Track $track): SymfonyResponse
+    {
+        $this->authorize('update', $track);
+
+        $track->update(['share_token' => null]);
+
+        return response()->noContent();
     }
 
     public function update(UpdateTrackRequest $request, Track $track): JsonResponse
@@ -85,6 +108,16 @@ class TrackController extends Controller
     {
         $this->authorize('view', $track);
 
+        return $this->serveAudio($track);
+    }
+
+    public function streamShared(Track $track): SymfonyResponse
+    {
+        return $this->serveAudio($track);
+    }
+
+    private function serveAudio(Track $track): SymfonyResponse
+    {
         // S3 streams (and seeks) directly from a short-lived signed URL; local
         // disks are served through a range-aware file response for scrubbing.
         if ($this->diskDriver() === 's3') {
@@ -100,6 +133,28 @@ class TrackController extends Controller
         return response()->file($disk->path($track->s3_key), [
             'Content-Type' => $track->mime ?: 'audio/wav',
         ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function trackProps(Track $track, string $streamUrl): array
+    {
+        return [
+            'id' => $track->id,
+            'name' => $track->original_name,
+            'size' => $track->size,
+            'mime' => $track->mime,
+            'duration_seconds' => $track->duration_seconds,
+            'peaks' => $track->peaks,
+            'channel_labels' => $track->channel_labels,
+            'peaks_ready' => $track->peaks !== null,
+            'created_at' => $track->created_at?->toIso8601String(),
+            'stream_url' => $streamUrl,
+            // Per-channel mixing needs a CORS-clean (same-origin) source; the S3
+            // branch redirects off-origin, which taints Web Audio.
+            'streams_same_origin' => $this->diskDriver() !== 's3',
+        ];
     }
 
     public function uploadUrl(UploadUrlRequest $request): array

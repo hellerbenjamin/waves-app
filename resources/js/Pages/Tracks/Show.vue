@@ -2,16 +2,25 @@
 import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { Head, Link, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
+import PublicLayout from '@/Layouts/PublicLayout.vue';
 import Button from 'primevue/button';
 import Tag from 'primevue/tag';
 import Card from 'primevue/card';
 import Message from 'primevue/message';
 import Slider from 'primevue/slider';
+import Select from 'primevue/select';
+import Dialog from 'primevue/dialog';
+import InputText from 'primevue/inputtext';
 import WaveSurfer from 'wavesurfer.js';
 
 const props = defineProps({
     track: { type: Object, required: true },
+    templates: { type: Array, default: () => [] },
+    canEdit: { type: Boolean, default: true },
 });
+
+// Owners get the app chrome; public share links render under a guest layout.
+const Layout = props.canEdit ? AuthenticatedLayout : PublicLayout;
 
 const waveformEl = ref(null);
 const isPlaying = ref(false);
@@ -26,6 +35,12 @@ const pans = ref([]);
 const muted = ref([]);
 const labels = ref([]);
 const mixerUnavailable = ref(false);
+
+// Saved channel-name templates the user can apply to this (or any) track.
+const templateList = ref([...props.templates]);
+const selectedTemplate = ref(null);
+const showSaveDialog = ref(false);
+const newTemplateName = ref('');
 
 let ws = null;
 let audioCtx = null;
@@ -155,21 +170,26 @@ const focusAdjacentLabel = (event, i) => {
     }
 };
 
+const csrfToken = () => decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || '');
+
+const apiFetch = (url, { method, body }) => fetch(url, {
+    method,
+    credentials: 'same-origin',
+    headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        Accept: 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': csrfToken(),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+});
+
 const saveLabels = async () => {
     labelsStatus.value = 'saving';
     try {
-        const res = await fetch(route('tracks.update', props.track.id), {
+        const res = await apiFetch(route('tracks.update', props.track.id), {
             method: 'PATCH',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
-            },
-            body: JSON.stringify({
-                channel_labels: labels.value.map((l) => l.trim() || null),
-            }),
+            body: { channel_labels: labels.value.map((l) => l.trim() || null) },
         });
         if (!res.ok) throw new Error(`save failed (${res.status})`);
 
@@ -178,6 +198,90 @@ const saveLabels = async () => {
         savedTimer = setTimeout(() => { labelsStatus.value = ''; }, 1500);
     } catch (e) {
         labelsStatus.value = '';
+    }
+};
+
+// Apply a template's ordered labels onto this track's channels by index
+// (extra template entries are ignored, missing ones clear the channel).
+const applyTemplate = (template) => {
+    if (!template) return;
+    labels.value = labels.value.map((_, i) => template.labels?.[i] ?? '');
+    selectedTemplate.value = null; // leave the picker on its placeholder
+    saveLabels();
+};
+
+const openSaveTemplate = () => {
+    newTemplateName.value = (props.track.name || '').replace(/\.[^.]+$/, '');
+    showSaveDialog.value = true;
+};
+
+const saveTemplate = async () => {
+    const name = newTemplateName.value.trim();
+    if (!name) return;
+    try {
+        const res = await apiFetch(route('channel-templates.store'), {
+            method: 'POST',
+            body: { name, labels: labels.value.map((l) => l.trim() || null) },
+        });
+        if (!res.ok) throw new Error(`save failed (${res.status})`);
+        templateList.value.unshift(await res.json());
+        showSaveDialog.value = false;
+    } catch (e) {
+        // leave the dialog open so the user can retry
+    }
+};
+
+const deleteTemplate = async (template) => {
+    try {
+        const res = await apiFetch(route('channel-templates.destroy', template.id), { method: 'DELETE' });
+        if (!res.ok) throw new Error('delete failed');
+        templateList.value = templateList.value.filter((t) => t.id !== template.id);
+    } catch (e) {
+        // ignore
+    }
+};
+
+// Public sharing (owner only).
+const shareUrl = ref(props.track.share_url ?? null);
+const showShareDialog = ref(false);
+const shareBusy = ref(false);
+const copied = ref(false);
+
+const openShare = () => { showShareDialog.value = true; };
+
+const enableShare = async () => {
+    shareBusy.value = true;
+    try {
+        const res = await apiFetch(route('tracks.share', props.track.id), { method: 'POST', body: {} });
+        if (!res.ok) throw new Error('share failed');
+        shareUrl.value = (await res.json()).share_url;
+    } catch (e) {
+        // ignore
+    } finally {
+        shareBusy.value = false;
+    }
+};
+
+const disableShare = async () => {
+    shareBusy.value = true;
+    try {
+        const res = await apiFetch(route('tracks.unshare', props.track.id), { method: 'DELETE' });
+        if (!res.ok) throw new Error('unshare failed');
+        shareUrl.value = null;
+    } catch (e) {
+        // ignore
+    } finally {
+        shareBusy.value = false;
+    }
+};
+
+const copyShareUrl = async () => {
+    try {
+        await navigator.clipboard.writeText(shareUrl.value);
+        copied.value = true;
+        setTimeout(() => { copied.value = false; }, 1500);
+    } catch (e) {
+        // clipboard blocked; the field is selectable as a fallback
     }
 };
 
@@ -266,14 +370,25 @@ onBeforeUnmount(() => {
 <template>
     <Head :title="track.name" />
 
-    <AuthenticatedLayout>
+    <component :is="Layout">
         <template #header>
             <div class="header-row">
-                <Link :href="route('tracks.index')" class="back-link">
+                <Link v-if="canEdit" :href="route('tracks.index')" class="back-link">
                     <i class="pi pi-arrow-left" />
                     <span>Tracks</span>
                 </Link>
                 <h2 class="page-title">{{ track.name }}</h2>
+                <Tag v-if="!canEdit" value="Shared" severity="info" />
+                <Button
+                    v-if="canEdit"
+                    class="share-btn"
+                    :icon="shareUrl ? 'pi pi-link' : 'pi pi-share-alt'"
+                    :label="shareUrl ? 'Sharing' : 'Share'"
+                    :severity="shareUrl ? 'success' : 'secondary'"
+                    :outlined="!shareUrl"
+                    size="small"
+                    @click="openShare"
+                />
             </div>
         </template>
 
@@ -322,14 +437,37 @@ onBeforeUnmount(() => {
                 <template #title>
                     <div class="mixer-header">
                         <span class="mixer-title">Channel mixer</span>
-                        <span class="mixer-status" :class="{ visible: labelsStatus }">
-                            <template v-if="labelsStatus === 'saving'">Saving…</template>
-                            <template v-else-if="labelsStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
-                        </span>
+                        <div v-if="canEdit" class="mixer-actions">
+                            <span class="mixer-status" :class="{ visible: labelsStatus }">
+                                <template v-if="labelsStatus === 'saving'">Saving…</template>
+                                <template v-else-if="labelsStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
+                            </span>
+                            <Select
+                                v-if="templateList.length"
+                                v-model="selectedTemplate"
+                                :options="templateList"
+                                option-label="name"
+                                placeholder="Apply template"
+                                class="template-select"
+                                @update:model-value="applyTemplate"
+                            >
+                                <template #option="{ option }">
+                                    <div class="template-option">
+                                        <span>{{ option.name }}</span>
+                                        <i
+                                            class="pi pi-trash template-option-del"
+                                            :aria-label="`Delete template ${option.name}`"
+                                            @click.stop.prevent="deleteTemplate(option)"
+                                        />
+                                    </div>
+                                </template>
+                            </Select>
+                            <Button label="Save as template" icon="pi pi-bookmark" size="small" outlined @click="openSaveTemplate" />
+                        </div>
                     </div>
                 </template>
                 <template #content>
-                    <p class="mixer-hint"><i class="pi pi-pencil" /> Click a channel name to rename it</p>
+                    <p v-if="canEdit" class="mixer-hint"><i class="pi pi-pencil" /> Click a channel name to rename it</p>
                     <div class="mixer">
                         <div v-for="(lvl, i) in levels" :key="i" class="fader" :class="{ muted: muted[i] }">
                             <span class="fader-val">{{ muted[i] ? '—' : `${lvl}%` }}</span>
@@ -351,7 +489,7 @@ onBeforeUnmount(() => {
                                 :aria-label="`Mute ${channelLabel(i, levels.length)}`"
                                 @click="toggleMute(i)"
                             />
-                            <div class="label-field">
+                            <div v-if="canEdit" class="label-field">
                                 <input
                                     :ref="(el) => setLabelRef(el, i)"
                                     v-model="labels[i]"
@@ -365,6 +503,7 @@ onBeforeUnmount(() => {
                                 />
                                 <i class="pi pi-pencil label-edit-icon" />
                             </div>
+                            <span v-else class="fader-label">{{ labels[i] || channelLabel(i, levels.length) }}</span>
 
                             <div class="pan">
                                 <Slider
@@ -418,7 +557,36 @@ onBeforeUnmount(() => {
                 </template>
             </Card>
         </div>
-    </AuthenticatedLayout>
+
+        <Dialog v-if="canEdit" v-model:visible="showSaveDialog" modal header="Save channel template" :style="{ width: '24rem' }">
+            <div class="save-dialog">
+                <label for="tpl-name">Template name</label>
+                <InputText id="tpl-name" v-model="newTemplateName" autofocus @keyup.enter="saveTemplate" />
+                <p class="save-dialog-hint">Saves the current channel names as a reusable, ordered template you can apply to other tracks.</p>
+            </div>
+            <template #footer>
+                <Button label="Cancel" text @click="showSaveDialog = false" />
+                <Button label="Save" icon="pi pi-bookmark" :disabled="!newTemplateName.trim()" @click="saveTemplate" />
+            </template>
+        </Dialog>
+
+        <Dialog v-if="canEdit" v-model:visible="showShareDialog" modal header="Share this track" :style="{ width: '26rem' }">
+            <div class="share-dialog">
+                <template v-if="shareUrl">
+                    <p class="share-dialog-hint">Anyone with this link can play the track — no account needed.</p>
+                    <div class="share-link-row">
+                        <InputText :model-value="shareUrl" readonly class="share-link" @focus="$event.target.select()" />
+                        <Button :icon="copied ? 'pi pi-check' : 'pi pi-copy'" :label="copied ? 'Copied' : 'Copy'" @click="copyShareUrl" />
+                    </div>
+                </template>
+                <p v-else class="share-dialog-hint">Create a public link to let anyone play this track without signing in.</p>
+            </div>
+            <template #footer>
+                <Button v-if="shareUrl" label="Stop sharing" severity="danger" text :loading="shareBusy" @click="disableShare" />
+                <Button v-else label="Create public link" icon="pi pi-share-alt" :loading="shareBusy" @click="enableShare" />
+            </template>
+        </Dialog>
+    </component>
 </template>
 
 <style scoped>
@@ -439,8 +607,22 @@ onBeforeUnmount(() => {
 .processing-title { margin: 0; font-weight: 600; color: var(--p-text-color); }
 .processing-sub { margin: 0.125rem 0 0; font-size: 0.875rem; }
 
-.mixer-header { display: flex; align-items: center; gap: 0.75rem; }
+.mixer-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 .mixer-title { font-size: 1rem; font-weight: 600; }
+.mixer-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.template-select { min-width: 12rem; }
+.template-option { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; width: 100%; }
+.template-option-del { color: var(--p-text-muted-color); padding: 0.25rem; border-radius: 4px; }
+.template-option-del:hover { color: var(--p-red-500); }
+.save-dialog { display: flex; flex-direction: column; gap: 0.5rem; }
+.save-dialog label { font-size: 0.875rem; font-weight: 500; }
+.save-dialog .p-inputtext { width: 100%; }
+.save-dialog-hint { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--p-text-muted-color); }
+.share-btn { margin-left: auto; }
+.share-dialog { display: flex; flex-direction: column; gap: 0.75rem; }
+.share-dialog-hint { margin: 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
+.share-link-row { display: flex; gap: 0.5rem; }
+.share-link { flex: 1; font-family: var(--p-font-family-mono, monospace); font-size: 0.8125rem; }
 .mixer-status { font-size: 0.8125rem; color: var(--p-text-muted-color); opacity: 0; transition: opacity 0.2s; display: inline-flex; align-items: center; gap: 0.25rem; }
 .mixer-status.visible { opacity: 1; }
 .mixer { display: flex; flex-wrap: wrap; gap: 1.25rem; padding-top: 0.25rem; }
