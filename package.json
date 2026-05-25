@@ -16,6 +16,8 @@
     },
     "dependencies": {
         "@primeuix/themes": "^2.0.3",
+        "@uppy/aws-s3": "^5.1.0",
+        "@uppy/core": "^5.2.0",
         "axios": "^1.15.2",
         "primevue": "^4.5.5",
         "wavesurfer.js": "^7.12.6"
