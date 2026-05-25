@@ -1,58 +1,74 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Waves
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Waves is a Laravel + Inertia + Vue app for uploading, browsing, and sharing
+audio. Multitrack `.wav` files stream with a per-channel waveform mixer
+(wavesurfer.js + Web Audio), and **events** group tracks and collect the photos
+and videos from a show, rehearsal, or studio session. Tracks, events, and
+individual media can each be shared through an unguessable public link.
 
-## About Laravel
+## Stack
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+- **Backend:** Laravel 13 (PHP 8.4), MariaDB, database queue
+- **Frontend:** Inertia 2 + Vue 3, PrimeVue 4 (Aura theme), Vite
+- **Audio/media:** wavesurfer.js + Web Audio mixer, Uppy uploads
+- **Storage:** Cloudflare R2 (S3-compatible); large files upload direct to the
+  bucket via S3 multipart
+- **Local dev:** [ddev](https://ddev.com)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
-
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
-
-## Learning Laravel
-
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
-
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
-
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
+## Getting started
 
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+ddev start
+ddev composer install
+ddev npm install
+ddev artisan migrate
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+Then open <https://waves.ddev.site>.
 
-## Contributing
+### Hot reload
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+The dev workflow is HMR via the Vite dev server — **don't** run `vite build`.
+Start the server in its own terminal and leave it open:
 
-## Code of Conduct
+```bash
+ddev vite        # wraps `npm run dev` inside the web container; Ctrl-C to stop
+```
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+It serves assets over TLS at `https://waves.ddev.site:5173` (writes
+`public/hot`). Edits to Vue/JS hot-reload live in the browser.
 
-## Security Vulnerabilities
+### Background jobs
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Waveform extraction and image thumbnails run on the queue, so a worker must be
+running for uploads to finish processing:
+
+```bash
+ddev artisan queue:work
+```
+
+### Tests
+
+```bash
+ddev artisan test
+```
+
+## How it fits together
+
+- **Storage** lives behind `TrackStorage` and `MediaStorage`, which share their
+  S3 multipart/presign plumbing via the `InteractsWithS3` trait. Object keys are
+  owner-scoped (`users/{id}/…`, `media/users/{id}/…`) and ownership is enforced
+  from the key on the upload endpoints.
+- **Events** are folders: a track belongs to at most one event. (Cross-event
+  playlists are a planned, separate "tags" feature.) Media (photos/videos)
+  optionally belongs to an event too.
+- **Sharing** uses a `share_token` on tracks, events, and media to expose public,
+  unauthenticated pages. A shared event plays its own tracks and media through
+  the event's token.
+
+Agent-facing notes (conventions, gotchas) live in [CLAUDE.md](CLAUDE.md).
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+Built on the [Laravel framework](https://laravel.com), open-sourced under the
+[MIT license](https://opensource.org/licenses/MIT).
