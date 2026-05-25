@@ -1,0 +1,11 @@
+#!/bin/bash
+
+## Description: Start the Vite dev server for hot module reload
+## Usage: vite [flags]
+## Example: "ddev vite" — then open https://waves.ddev.site and edits hot-reload live. Ctrl-C to stop.
+
+# Runs inside the web container. The server listens on 5173, which
+# .ddev/config.vite.yaml exposes over TLS at https://waves.ddev.site:5173;
+# laravel-vite-plugin writes public/hot so the app loads assets from it.
+# Extra flags are forwarded to vite, e.g. `ddev vite --force`.
+npm run dev -- "$@"
