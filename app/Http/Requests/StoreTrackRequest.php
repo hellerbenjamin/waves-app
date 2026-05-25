@@ -3,6 +3,7 @@
 namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreTrackRequest extends FormRequest
 {
@@ -18,6 +19,8 @@ class StoreTrackRequest extends FormRequest
             'original_name' => ['required', 'string', 'max:255'],
             'mime' => ['required', 'string', 'max:64'],
             'size' => ['required', 'integer', 'min:1'],
+            // Optional: upload straight into one of the user's events.
+            'event_id' => ['nullable', 'integer', Rule::exists('events', 'id')->where('user_id', $this->user()->id)],
         ];
     }
 }

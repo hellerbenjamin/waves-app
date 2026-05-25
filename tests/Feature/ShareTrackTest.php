@@ -67,6 +67,10 @@ class ShareTrackTest extends TestCase
             'original_name' => 'shared.wav',
         ]);
 
+        // A public share page must stay revocable, so it embeds the token-scoped
+        // app stream route (which 404s the moment the token is cleared) rather
+        // than baking in a long-lived presigned URL. The presigned URL is minted
+        // fresh per request by the stream endpoint instead.
         $this->get('/share/publicshowtoken12345')
             ->assertOk()
             ->assertInertia(fn ($page) => $page
@@ -75,6 +79,7 @@ class ShareTrackTest extends TestCase
                 ->where('track.id', $track->id)
                 ->where('track.name', 'shared.wav')
                 ->where('track.stream_url', route('tracks.shared-stream', $track->share_token))
+                ->where('track.stream_cross_origin', 'anonymous')
             );
     }
 
@@ -106,5 +111,29 @@ class ShareTrackTest extends TestCase
     public function test_public_stream_404s_for_unknown_token(): void
     {
         $this->get('/share/nope/stream')->assertNotFound();
+    }
+
+    public function test_public_stream_stops_working_after_unshare(): void
+    {
+        config(['filesystems.tracks_disk' => 'local']);
+        Storage::fake('local');
+
+        $user = User::factory()->create();
+        $key = "users/{$user->id}/shared.wav";
+        Storage::disk('local')->put($key, 'RIFF....WAVEfake');
+        $track = Track::factory()->for($user)->create([
+            's3_key' => $key,
+            'mime' => 'audio/wav',
+            'share_token' => 'revoketoken123456789',
+        ]);
+
+        // The shared page embeds the token route, not a long-lived presigned
+        // URL, so clearing the token revokes playback immediately rather than
+        // leaving an already-issued URL valid until it expires.
+        $this->get("/share/{$track->share_token}/stream")->assertOk();
+
+        $this->actingAs($user)->delete("/tracks/{$track->id}/share")->assertNoContent();
+
+        $this->get('/share/revoketoken123456789/stream')->assertNotFound();
     }
 }

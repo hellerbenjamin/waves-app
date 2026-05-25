@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\ChannelTemplateController;
+use App\Http\Controllers\EventController;
+use App\Http\Controllers\MediaController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\TrackController;
 use Illuminate\Foundation\Application;
@@ -10,6 +12,17 @@ use Inertia\Inertia;
 // Public share links — no auth; the unguessable token is the access control.
 Route::get('/share/{track:share_token}', [TrackController::class, 'showShared'])->name('tracks.shared');
 Route::get('/share/{track:share_token}/stream', [TrackController::class, 'streamShared'])->name('tracks.shared-stream');
+
+// A shared event reaches its own tracks and media through the event token, so
+// individual items don't each need a share link.
+Route::get('/events/share/{event:share_token}', [EventController::class, 'showShared'])->name('events.shared');
+Route::get('/events/share/{event:share_token}/tracks/{track}/stream', [EventController::class, 'streamSharedTrack'])->name('events.shared.track-stream');
+Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
+Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
+
+// Per-item media share links.
+Route::get('/media/share/{media:share_token}', [MediaController::class, 'showShared'])->name('media.shared');
+Route::get('/media/share/{media:share_token}/stream', [MediaController::class, 'streamShared'])->name('media.shared-stream');
 
 Route::get('/', function () {
     return Inertia::render('Welcome', [
@@ -33,6 +46,14 @@ Route::middleware('auth')->group(function () {
     Route::patch('/tracks/{track}', [TrackController::class, 'update'])->name('tracks.update');
     Route::post('/tracks/upload-url', [TrackController::class, 'uploadUrl'])->name('tracks.upload-url');
     Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');
+
+    // Multipart upload for multi-gigabyte files: the browser drives parts
+    // directly to S3 against these signing/finalising endpoints.
+    Route::post('/tracks/multipart', [TrackController::class, 'createMultipart'])->name('tracks.multipart.create');
+    Route::get('/tracks/multipart/sign', [TrackController::class, 'signPart'])->name('tracks.multipart.sign');
+    Route::post('/tracks/multipart/complete', [TrackController::class, 'completeMultipart'])->name('tracks.multipart.complete');
+    Route::post('/tracks/multipart/abort', [TrackController::class, 'abortMultipart'])->name('tracks.multipart.abort');
+    Route::post('/tracks/cleanup', [TrackController::class, 'cleanup'])->name('tracks.cleanup');
     Route::post('/tracks', [TrackController::class, 'store'])->name('tracks.store');
     Route::delete('/tracks/{track}', [TrackController::class, 'destroy'])->name('tracks.destroy');
     Route::post('/tracks/{track}/share', [TrackController::class, 'share'])->name('tracks.share');
@@ -40,6 +61,33 @@ Route::middleware('auth')->group(function () {
 
     Route::post('/channel-templates', [ChannelTemplateController::class, 'store'])->name('channel-templates.store');
     Route::delete('/channel-templates/{channelTemplate}', [ChannelTemplateController::class, 'destroy'])->name('channel-templates.destroy');
+
+    // Events — folders of tracks plus their photos and videos.
+    Route::get('/events', [EventController::class, 'index'])->name('events.index');
+    Route::post('/events', [EventController::class, 'store'])->name('events.store');
+    Route::get('/events/{event}', [EventController::class, 'show'])->name('events.show');
+    Route::patch('/events/{event}', [EventController::class, 'update'])->name('events.update');
+    Route::delete('/events/{event}', [EventController::class, 'destroy'])->name('events.destroy');
+    Route::post('/events/{event}/share', [EventController::class, 'share'])->name('events.share');
+    Route::delete('/events/{event}/share', [EventController::class, 'unshare'])->name('events.unshare');
+    Route::post('/events/{event}/tracks', [EventController::class, 'attachTracks'])->name('events.tracks.attach');
+    Route::delete('/events/{event}/tracks/{track}', [EventController::class, 'detachTrack'])->name('events.tracks.detach');
+
+    // Media — photos and videos. Literal upload/multipart routes are declared
+    // before the /media/{media} wildcards so they win the match.
+    Route::post('/media/upload-url', [MediaController::class, 'uploadUrl'])->name('media.upload-url');
+    Route::put('/media/upload', [MediaController::class, 'uploadPut'])->middleware('signed')->name('media.upload-put');
+    Route::post('/media/multipart', [MediaController::class, 'createMultipart'])->name('media.multipart.create');
+    Route::get('/media/multipart/sign', [MediaController::class, 'signPart'])->name('media.multipart.sign');
+    Route::post('/media/multipart/complete', [MediaController::class, 'completeMultipart'])->name('media.multipart.complete');
+    Route::post('/media/multipart/abort', [MediaController::class, 'abortMultipart'])->name('media.multipart.abort');
+    Route::post('/media/cleanup', [MediaController::class, 'cleanup'])->name('media.cleanup');
+    Route::post('/media', [MediaController::class, 'store'])->name('media.store');
+    Route::get('/media/{media}/stream', [MediaController::class, 'stream'])->name('media.stream');
+    Route::get('/media/{media}/thumb', [MediaController::class, 'thumb'])->name('media.thumb');
+    Route::delete('/media/{media}', [MediaController::class, 'destroy'])->name('media.destroy');
+    Route::post('/media/{media}/share', [MediaController::class, 'share'])->name('media.share');
+    Route::delete('/media/{media}/share', [MediaController::class, 'unshare'])->name('media.unshare');
 });
 
 require __DIR__.'/auth.php';

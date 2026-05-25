@@ -11,14 +11,40 @@ import Card from 'primevue/card';
 import Message from 'primevue/message';
 import Dialog from 'primevue/dialog';
 import InputText from 'primevue/inputtext';
+import Select from 'primevue/select';
 import { useToast } from 'primevue/usetoast';
 import Toast from 'primevue/toast';
 import ConfirmDialog from 'primevue/confirmdialog';
 import { useConfirm } from 'primevue/useconfirm';
+import Uppy from '@uppy/core';
+import AwsS3 from '@uppy/aws-s3';
 
 defineProps({
     tracks: { type: Array, required: true },
+    events: { type: Array, default: () => [] },
 });
+
+// Assign (or clear, when eventId is null) a track's event, then refresh the
+// table so the new grouping is reflected.
+const assignEvent = async (track, eventId) => {
+    try {
+        const res = await fetch(route('tracks.update', track.id), {
+            method: 'PATCH',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
+            },
+            body: JSON.stringify({ event_id: eventId }),
+        });
+        if (!res.ok) throw new Error(`failed (${res.status})`);
+        router.reload({ only: ['tracks'], preserveScroll: true });
+    } catch (err) {
+        toast.add({ severity: 'error', summary: 'Could not move track', detail: err.message, life: 4000 });
+    }
+};
 
 const fileInput = ref(null);
 const uploads = ref([]);
@@ -42,82 +68,159 @@ const formatDuration = (s) => {
 
 const pickFile = () => fileInput.value?.click();
 
-const onFileSelected = async (event) => {
+// Hard ceiling on upload size, mirrored server-side. 50 GB.
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 * 1024;
+
+const csrfToken = () => decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || '');
+
+const apiFetch = (url, { method = 'GET', body } = {}) => fetch(url, {
+    method,
+    credentials: 'same-origin',
+    headers: {
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        Accept: 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-XSRF-TOKEN': csrfToken(),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+});
+
+// uppy file id -> the reactive row we render in the upload list.
+const uploadEntries = new Map();
+// uppy file id -> the storage key minted when the upload was initiated.
+const uploadKeys = new Map();
+
+// Uppy + the unified AWS S3 plugin: small files take a single presigned PUT,
+// anything large is uploaded as multipart so multi-gigabyte files don't ride on
+// one request. All signing/finalising goes through our own endpoints (no
+// Companion server); the browser PUTs the bytes straight to R2.
+const uppy = new Uppy({ autoProceed: true })
+    .use(AwsS3, {
+        // Below ~100 MB a single PUT is simpler and cheaper than multipart.
+        shouldUseMultipart: (file) => file.size > 100 * 1024 * 1024,
+        // Keep part count under S3's 10,000 cap even at 50 GB, never below the
+        // 5 MB minimum part size.
+        getChunkSize: (file) => Math.max(5 * 1024 * 1024, Math.ceil(file.size / 9000)),
+
+        async getUploadParameters(file) {
+            const res = await apiFetch(route('tracks.upload-url'), {
+                method: 'POST',
+                body: { filename: file.name, size: file.size, content_type: file.type || 'audio/wav' },
+            });
+            if (!res.ok) throw new Error(`init failed (${res.status})`);
+            const data = await res.json();
+            uploadKeys.set(file.id, data.s3_key);
+            return { method: 'PUT', url: data.url, headers: data.headers || {} };
+        },
+
+        async createMultipartUpload(file) {
+            const res = await apiFetch(route('tracks.multipart.create'), {
+                method: 'POST',
+                body: { filename: file.name, size: file.size, content_type: file.type || 'audio/wav' },
+            });
+            if (!res.ok) throw new Error(`init failed (${res.status})`);
+            const data = await res.json();
+            uploadKeys.set(file.id, data.key);
+            return { uploadId: data.uploadId, key: data.key };
+        },
+
+        async signPart(file, { uploadId, key, partNumber }) {
+            const url = `${route('tracks.multipart.sign')}?key=${encodeURIComponent(key)}`
+                + `&uploadId=${encodeURIComponent(uploadId)}&partNumber=${partNumber}`;
+            const res = await apiFetch(url);
+            if (!res.ok) throw new Error(`sign failed (${res.status})`);
+            return { url: (await res.json()).url };
+        },
+
+        async completeMultipartUpload(file, { uploadId, key, parts }) {
+            const res = await apiFetch(route('tracks.multipart.complete'), {
+                method: 'POST',
+                body: { key, uploadId, parts },
+            });
+            if (!res.ok) throw new Error(`complete failed (${res.status})`);
+            return { location: (await res.json()).location };
+        },
+
+        async abortMultipartUpload(file, { uploadId, key }) {
+            await apiFetch(route('tracks.multipart.abort'), { method: 'POST', body: { key, uploadId } });
+        },
+    });
+
+uppy.on('upload-progress', (file, progress) => {
+    const entry = uploadEntries.get(file.id);
+    if (!entry) return;
+    entry.status = 'uploading';
+    if (progress.bytesTotal) entry.progress = Math.round((progress.bytesUploaded / progress.bytesTotal) * 100);
+});
+
+// The bytes are in storage; create the Track row so the rest of the app sees it.
+uppy.on('upload-success', async (file) => {
+    const entry = uploadEntries.get(file.id);
+    const key = uploadKeys.get(file.id);
+    if (entry) { entry.status = 'finalizing'; entry.progress = 100; }
+
+    try {
+        await new Promise((resolve, reject) => {
+            router.post(route('tracks.store'), {
+                s3_key: key,
+                original_name: file.name,
+                mime: file.type || 'audio/wav',
+                size: file.size,
+            }, { preserveScroll: true, onSuccess: resolve, onError: reject });
+        });
+
+        if (entry) {
+            entry.status = 'done';
+            uploads.value = uploads.value.filter(u => u !== entry);
+        }
+        toast.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 });
+    } catch (err) {
+        if (entry) entry.status = 'error';
+        // The bytes reached the bucket but no Track row was created; delete the
+        // orphaned object so a failed finalise doesn't leak storage. Best effort.
+        if (key) apiFetch(route('tracks.cleanup'), { method: 'POST', body: { key } }).catch(() => {});
+        toast.add({ severity: 'error', summary: 'Upload failed', detail: `${file.name}: finalize failed`, life: 5000 });
+    } finally {
+        uploadEntries.delete(file.id);
+        uploadKeys.delete(file.id);
+        uppy.removeFile(file.id);
+    }
+});
+
+uppy.on('upload-error', (file, error) => {
+    const entry = uploadEntries.get(file?.id);
+    if (entry) entry.status = 'error';
+    toast.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${error?.message || 'error'}`, life: 5000 });
+    uploadEntries.delete(file?.id);
+    uploadKeys.delete(file?.id);
+});
+
+const onFileSelected = (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
-    for (const file of files) {
-        await uploadOne(file);
-    }
+    for (const file of files) addUpload(file);
 };
 
-const uploadOne = async (file) => {
+const addUpload = (file) => {
     if (!/\.wav$/i.test(file.name)) {
         toast.add({ severity: 'error', summary: 'Invalid file', detail: `${file.name}: only .wav files are allowed`, life: 4000 });
         return;
     }
 
-    const entry = ref({ name: file.name, progress: 0, status: 'requesting' });
+    if (file.size > MAX_UPLOAD_BYTES) {
+        toast.add({ severity: 'error', summary: 'File too large', detail: `${file.name}: ${formatBytes(file.size)} exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit`, life: 5000 });
+        return;
+    }
+
+    const entry = ref({ name: file.name, progress: 0, status: 'queued' });
     uploads.value.push(entry.value);
 
     try {
-        const csrf = document.querySelector('meta[name="csrf-token"]')?.content
-            || document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1];
-
-        const initRes = await fetch(route('tracks.upload-url'), {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest',
-                'X-XSRF-TOKEN': decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] || ''),
-            },
-            body: JSON.stringify({
-                filename: file.name,
-                size: file.size,
-                content_type: file.type || 'audio/wav',
-            }),
-        });
-
-        if (!initRes.ok) throw new Error(`init failed (${initRes.status})`);
-        const { url, headers, s3_key } = await initRes.json();
-
-        entry.value.status = 'uploading';
-
-        await new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open('PUT', url, true);
-            for (const [k, v] of Object.entries(headers || {})) xhr.setRequestHeader(k, v);
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) entry.value.progress = Math.round((e.loaded / e.total) * 100);
-            };
-            xhr.onload = () => (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(`S3 upload ${xhr.status}`));
-            xhr.onerror = () => reject(new Error('Network error'));
-            xhr.send(file);
-        });
-
-        entry.value.status = 'finalizing';
-        entry.value.progress = 100;
-
-        await new Promise((resolve, reject) => {
-            router.post(route('tracks.store'), {
-                s3_key,
-                original_name: file.name,
-                mime: file.type || 'audio/wav',
-                size: file.size,
-            }, {
-                preserveScroll: true,
-                onSuccess: resolve,
-                onError: reject,
-            });
-        });
-
-        entry.value.status = 'done';
-        toast.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 });
-        uploads.value = uploads.value.filter(u => u !== entry.value);
+        const id = uppy.addFile({ name: file.name, type: file.type || 'audio/wav', data: file });
+        uploadEntries.set(id, entry.value);
     } catch (err) {
         entry.value.status = 'error';
-        toast.add({ severity: 'error', summary: 'Upload failed', detail: `${file.name}: ${err.message}`, life: 5000 });
+        toast.add({ severity: 'error', summary: 'Upload failed', detail: `${file.name}: ${err?.message || 'could not queue'}`, life: 5000 });
     }
 };
 
@@ -225,6 +328,21 @@ const submitRename = async () => {
                         <Column header="Size">
                             <template #body="{ data }">{{ formatBytes(data.size) }}</template>
                         </Column>
+                        <Column header="Event" style="width: 14rem">
+                            <template #body="{ data }">
+                                <Select
+                                    :modelValue="data.event_id"
+                                    :options="events"
+                                    optionLabel="name"
+                                    optionValue="id"
+                                    placeholder="—"
+                                    showClear
+                                    size="small"
+                                    class="event-select"
+                                    @update:modelValue="(val) => assignEvent(data, val)"
+                                />
+                            </template>
+                        </Column>
                         <Column header="" style="width: 8rem; text-align: right">
                             <template #body="{ data }">
                                 <Button icon="pi pi-pencil" severity="secondary" text rounded aria-label="Rename" @click="openRename(data)" />
@@ -256,6 +374,7 @@ const submitRename = async () => {
 .upload-list { display: flex; flex-direction: column; gap: 0.875rem; }
 .upload-row { display: flex; flex-direction: column; gap: 0.375rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
+.event-select { width: 100%; }
 .track-link { color: var(--p-primary-color); text-decoration: none; font-weight: 500; }
 .track-link:hover { text-decoration: underline; }
 .rename-dialog { display: flex; flex-direction: column; gap: 0.5rem; }

@@ -5,6 +5,8 @@ namespace Tests\Feature;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
 use App\Models\User;
+use Aws\Result;
+use Aws\S3\S3Client;
 use Illuminate\Filesystem\AwsS3V3Adapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
@@ -50,10 +52,16 @@ class TrackTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_show_renders_track_with_stream_url(): void
+    public function test_show_renders_track_with_presigned_stream_url(): void
     {
         $user = User::factory()->create();
         $track = Track::factory()->for($user)->withPeaks()->create(['original_name' => 'mix.wav']);
+
+        // On s3 the player loads a presigned object URL directly (not the app
+        // stream route) so it stays CORS-clean for the mixer.
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-stream');
+        Storage::shouldReceive('disk')->andReturn($disk);
 
         $this->actingAs($user)
             ->get("/tracks/{$track->id}")
@@ -63,8 +71,8 @@ class TrackTest extends TestCase
                 ->where('track.id', $track->id)
                 ->where('track.name', 'mix.wav')
                 ->where('track.peaks_ready', true)
-                ->where('track.stream_url', route('tracks.stream', $track->id))
-                ->where('track.streams_same_origin', false) // s3 disk in tests
+                ->where('track.stream_url', 'https://s3.example/signed-stream')
+                ->where('track.stream_cross_origin', 'anonymous') // s3 disk in tests
                 ->has('track.peaks.channels')
             );
     }
@@ -198,7 +206,7 @@ class TrackTest extends TestCase
         $this->actingAs($user)
             ->postJson('/tracks/upload-url', [
                 'filename' => 'song.wav',
-                'size' => 5_368_709_121, // 5GB + 1
+                'size' => 5_368_709_121, // 5GB + 1: over the single-PUT limit
                 'content_type' => 'audio/wav',
             ])
             ->assertUnprocessable()
@@ -308,6 +316,90 @@ class TrackTest extends TestCase
         Bus::assertDispatched(ExtractPeaks::class, fn ($job) => $job->track->s3_key === $key);
     }
 
+    public function test_create_multipart_returns_upload_id_scoped_to_user(): void
+    {
+        $user = User::factory()->create();
+
+        $client = Mockery::mock(S3Client::class);
+        $client->shouldReceive('createMultipartUpload')->once()->andReturn(new Result(['UploadId' => 'UP123']));
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('getClient')->andReturn($client);
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $response = $this->actingAs($user)
+            ->postJson('/tracks/multipart', ['filename' => 'song.wav', 'size' => 8_000_000_000, 'content_type' => 'audio/wav'])
+            ->assertOk()
+            ->assertJsonStructure(['key', 'uploadId']);
+
+        $this->assertSame('UP123', $response->json('uploadId'));
+        $this->assertStringStartsWith("users/{$user->id}/", $response->json('key'));
+        $this->assertStringEndsWith('.wav', $response->json('key'));
+    }
+
+    public function test_create_multipart_rejects_non_wav_filename(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)
+            ->postJson('/tracks/multipart', ['filename' => 'song.mp3', 'size' => 1024, 'content_type' => 'audio/wav'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('filename');
+    }
+
+    public function test_create_multipart_rejects_oversize(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)
+            ->postJson('/tracks/multipart', [
+                'filename' => 'huge.wav',
+                'size' => 53_687_091_201, // 50GB + 1
+                'content_type' => 'audio/wav',
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('size');
+    }
+
+    public function test_sign_part_rejects_key_belonging_to_other_user(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+
+        $this->actingAs($user)
+            ->getJson('/tracks/multipart/sign?key=users/'.$other->id.'/x.wav&uploadId=UP1&partNumber=1')
+            ->assertForbidden();
+    }
+
+    public function test_complete_multipart_rejects_key_belonging_to_other_user(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+
+        $this->actingAs($user)
+            ->postJson('/tracks/multipart/complete', [
+                'key' => "users/{$other->id}/x.wav",
+                'uploadId' => 'UP1',
+                'parts' => [['PartNumber' => 1, 'ETag' => 'abc']],
+            ])
+            ->assertForbidden();
+    }
+
+    public function test_abort_multipart_aborts_upload(): void
+    {
+        $user = User::factory()->create();
+        $key = "users/{$user->id}/abc.wav";
+
+        $client = Mockery::mock(S3Client::class);
+        $client->shouldReceive('abortMultipartUpload')->once();
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('getClient')->andReturn($client);
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->actingAs($user)
+            ->postJson('/tracks/multipart/abort', ['key' => $key, 'uploadId' => 'UP1'])
+            ->assertNoContent();
+    }
+
     public function test_destroy_403s_for_other_users_track(): void
     {
         $user = User::factory()->create();
@@ -336,5 +428,36 @@ class TrackTest extends TestCase
 
         $this->assertDatabaseMissing('tracks', ['id' => $track->id]);
         Storage::disk('s3')->assertMissing($key);
+    }
+
+    public function test_cleanup_deletes_an_orphaned_object(): void
+    {
+        $user = User::factory()->create();
+        Storage::fake('s3');
+
+        $key = "users/{$user->id}/orphan.wav";
+        Storage::disk('s3')->put($key, 'bytes');
+
+        $this->actingAs($user)
+            ->postJson('/tracks/cleanup', ['key' => $key])
+            ->assertNoContent();
+
+        Storage::disk('s3')->assertMissing($key);
+    }
+
+    public function test_cleanup_rejects_key_belonging_to_other_user(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        Storage::fake('s3');
+
+        $key = "users/{$other->id}/orphan.wav";
+        Storage::disk('s3')->put($key, 'bytes');
+
+        $this->actingAs($user)
+            ->postJson('/tracks/cleanup', ['key' => $key])
+            ->assertForbidden();
+
+        Storage::disk('s3')->assertExists($key);
     }
 }

@@ -13,6 +13,7 @@ class Track extends Model
 
     protected $fillable = [
         'user_id',
+        'event_id',
         's3_key',
         'original_name',
         'mime',
@@ -34,6 +35,11 @@ class Track extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    public function event(): BelongsTo
+    {
+        return $this->belongsTo(Event::class);
     }
 
     protected function peaksReady(): Attribute

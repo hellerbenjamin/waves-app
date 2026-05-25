@@ -27,19 +27,27 @@ class TrackController extends Controller
     {
         $tracks = $request->user()
             ->tracks()
+            ->with('event:id,name')
             ->latest()
-            ->get(['id', 'original_name', 'size', 'duration_seconds', 'peaks', 'created_at'])
+            ->get(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'peaks', 'created_at'])
             ->map(fn (Track $t) => [
                 'id' => $t->id,
                 'name' => $t->original_name,
                 'size' => $t->size,
                 'duration_seconds' => $t->duration_seconds,
                 'peaks_ready' => $t->peaks !== null,
+                'event_id' => $t->event_id,
+                'event' => $t->event ? ['id' => $t->event->id, 'name' => $t->event->name] : null,
                 'created_at' => $t->created_at?->toIso8601String(),
             ]);
 
         return Inertia::render('Tracks/Index', [
             'tracks' => $tracks,
+            'events' => $request->user()
+                ->events()
+                ->latest()
+                ->get(['id', 'name'])
+                ->map(fn ($e) => ['id' => $e->id, 'name' => $e->name]),
         ]);
     }
 
@@ -65,7 +73,7 @@ class TrackController extends Controller
         return Inertia::render('Tracks/Show', [
             'canEdit' => false,
             'templates' => [],
-            'track' => $this->trackProps($track, route('tracks.shared-stream', $track->share_token)),
+            'track' => $this->trackProps($track, route('tracks.shared-stream', $track->share_token), shared: true),
         ]);
     }
 
@@ -100,6 +108,10 @@ class TrackController extends Controller
             $changes['original_name'] = trim($data['original_name']);
         }
 
+        if (array_key_exists('event_id', $data)) {
+            $changes['event_id'] = $data['event_id'];
+        }
+
         if (array_key_exists('channel_labels', $data)) {
             // Normalise blank entries to null and drop any beyond the channel count.
             $channels = count($track->peaks['channels'] ?? []);
@@ -132,7 +144,7 @@ class TrackController extends Controller
     /**
      * @return array<string, mixed>
      */
-    private function trackProps(Track $track, string $streamUrl): array
+    private function trackProps(Track $track, string $streamUrl, bool $shared = false): array
     {
         return [
             'id' => $track->id,
@@ -144,9 +156,10 @@ class TrackController extends Controller
             'channel_labels' => $track->channel_labels,
             'peaks_ready' => $track->peaks !== null,
             'created_at' => $track->created_at?->toIso8601String(),
-            'stream_url' => $streamUrl,
-            // Per-channel mixing needs a CORS-clean (same-origin) source.
-            'streams_same_origin' => $this->storage->streamsSameOrigin(),
+            'stream_url' => $this->storage->playbackUrl($track, $streamUrl, $shared),
+            // How the player must load the stream so it stays CORS-clean for
+            // the per-channel mixer: 'anonymous' for presigned S3, else creds.
+            'stream_cross_origin' => $this->storage->streamCrossOrigin(),
         ];
     }
 
@@ -155,6 +168,103 @@ class TrackController extends Controller
         return $this->storage->uploadTarget(
             $request->user(),
             $request->validated('content_type'),
+        );
+    }
+
+    /**
+     * Start a multipart upload (the path for multi-gigabyte files). Mints a
+     * user-scoped key and returns the S3 upload id the browser drives parts
+     * against. Finalisation still happens in store().
+     */
+    public function createMultipart(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'filename' => ['required', 'string', 'max:255', 'regex:/\.wav$/i'],
+            'size' => ['required', 'integer', 'min:1', 'max:53687091200'], // 50 GB
+            'content_type' => ['required', 'string', 'in:audio/wav,audio/x-wav,audio/wave,audio/vnd.wave'],
+        ]);
+
+        $key = $this->storage->newTrackKey($request->user());
+
+        return response()->json([
+            'key' => $key,
+            'uploadId' => $this->storage->createMultipartUpload($key, $validated['content_type']),
+        ]);
+    }
+
+    public function signPart(Request $request): JsonResponse
+    {
+        $key = (string) $request->query('key', '');
+        $this->assertOwnsKey($request, $key);
+
+        $uploadId = (string) $request->query('uploadId', '');
+        $partNumber = (int) $request->query('partNumber', 0);
+        abort_if($uploadId === '' || $partNumber < 1, 422);
+
+        return response()->json([
+            'url' => $this->storage->signPart($key, $uploadId, $partNumber),
+        ]);
+    }
+
+    public function completeMultipart(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'key' => ['required', 'string'],
+            'uploadId' => ['required', 'string'],
+            'parts' => ['required', 'array', 'min:1'],
+            'parts.*.PartNumber' => ['required', 'integer', 'min:1'],
+            'parts.*.ETag' => ['required', 'string'],
+        ]);
+        $this->assertOwnsKey($request, $validated['key']);
+
+        $this->storage->completeMultipartUpload(
+            $validated['key'],
+            $validated['uploadId'],
+            $validated['parts'],
+        );
+
+        return response()->json(['location' => $validated['key']]);
+    }
+
+    public function abortMultipart(Request $request): SymfonyResponse
+    {
+        $validated = $request->validate([
+            'key' => ['required', 'string'],
+            'uploadId' => ['required', 'string'],
+        ]);
+        $this->assertOwnsKey($request, $validated['key']);
+
+        $this->storage->abortMultipartUpload($validated['key'], $validated['uploadId']);
+
+        return response()->noContent();
+    }
+
+    /**
+     * Delete an uploaded object whose finalisation (store) failed. The bytes
+     * are already in the bucket but no Track row references them, so without
+     * this a failed finalise would orphan a (potentially multi-gigabyte)
+     * object forever. Authorised by the owner-encoding key, since no row exists.
+     */
+    public function cleanup(Request $request): SymfonyResponse
+    {
+        $validated = $request->validate(['key' => ['required', 'string']]);
+        $this->assertOwnsKey($request, $validated['key']);
+
+        $this->storage->delete($validated['key']);
+
+        return response()->noContent();
+    }
+
+    /**
+     * A track key encodes its owner; reject any that isn't this user's. The
+     * only authorisation the upload endpoints need, since no Track row exists
+     * yet.
+     */
+    private function assertOwnsKey(Request $request, string $key): void
+    {
+        abort_unless(
+            str_starts_with($key, 'users/'.$request->user()->id.'/') && str_ends_with($key, '.wav'),
+            403,
         );
     }
 
@@ -180,6 +290,7 @@ class TrackController extends Controller
 
         $track = $request->user()->tracks()->create([
             's3_key' => $key,
+            'event_id' => $request->validated('event_id'),
             'original_name' => $request->validated('original_name'),
             'mime' => $request->validated('mime'),
             'size' => $request->validated('size'),

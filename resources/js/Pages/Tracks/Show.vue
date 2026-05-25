@@ -87,12 +87,14 @@ const cssVar = (name, fallback) => {
 // channels reach both L and R — merging into a >2-channel bus would let the
 // stereo destination drop everything past the first two. Per-channel panning
 // is a later step: the panner nodes are already in place for it.
-const setupMixer = (audioEl, channels) => {
+const setupMixer = (audioEl, channels, corsOk) => {
     const Ctx = window.AudioContext || window.webkitAudioContext;
 
-    // Routing a cross-origin (S3-redirected) element through Web Audio would
-    // silently mute playback, so only build the graph for same-origin streams.
-    if (!Ctx || channels < 1 || !props.track.streams_same_origin) {
+    // Skip the graph when there's no Web Audio, nothing to split, or the source
+    // isn't readable cross-origin. Routing a CORS-tainted element through Web
+    // Audio would silently mute it, so in that case we leave the element to play
+    // on its own — audible, just without per-channel faders.
+    if (!Ctx || channels < 1 || !corsOk) {
         mixerUnavailable.value = true;
         return;
     }
@@ -309,17 +311,40 @@ const copyShareUrl = async () => {
     }
 };
 
-const initWaveform = () => {
-    if (ws || !waveformEl.value) return;
+// Whether the stream's bytes are readable from this origin. Same-origin routes
+// always are; an off-origin presigned (S3/R2) URL depends on the bucket's CORS,
+// so probe it with a one-byte ranged request that mirrors how the player reads.
+const streamReachable = async () => {
+    if (props.track.stream_cross_origin !== 'anonymous') return true;
+    try {
+        const res = await fetch(props.track.stream_url, { headers: { Range: 'bytes=0-0' } });
+        return res.ok || res.status === 206;
+    } catch {
+        return false; // CORS-blocked or unreachable
+    }
+};
+
+let initStarted = false;
+
+const initWaveform = async () => {
+    if (initStarted || !waveformEl.value) return;
+    initStarted = true; // guard the await window against a second trigger
 
     const channels = channelCount();
+
+    // Per-channel mixing and crossorigin='anonymous' both need to read the
+    // stream's bytes, which for an off-origin URL hinges on the bucket's CORS.
+    // Probe once: if reachable, load CORS-clean and build the mixer; if not,
+    // fall back to a plain element so playback stays audible (sans faders)
+    // rather than failing to load or muting silently.
+    const corsOk = await streamReachable();
 
     // Stream playback through a media element so large files seek via HTTP
     // range requests instead of being fully downloaded; the waveform itself
     // renders immediately from the pre-computed peaks.
     const audio = new Audio();
     audio.preload = 'metadata';
-    audio.crossOrigin = 'use-credentials';
+    if (corsOk) audio.crossOrigin = props.track.stream_cross_origin;
     audio.src = props.track.stream_url;
 
     ws = WaveSurfer.create({
@@ -339,7 +364,7 @@ const initWaveform = () => {
         normalize: false,
     });
 
-    setupMixer(audio, channels);
+    setupMixer(audio, channels, corsOk);
 
     ws.on('ready', () => { isReady.value = true; });
     ws.on('play', () => { isPlaying.value = true; audioCtx?.resume(); });
