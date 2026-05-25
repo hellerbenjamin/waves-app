@@ -23,6 +23,16 @@ class User extends Authenticatable implements MustVerifyEmail
         return $this->hasMany(Track::class);
     }
 
+    public function events(): HasMany
+    {
+        return $this->hasMany(Event::class);
+    }
+
+    public function media(): HasMany
+    {
+        return $this->hasMany(Media::class);
+    }
+
     public function channelTemplates(): HasMany
     {
         return $this->hasMany(ChannelTemplate::class);
