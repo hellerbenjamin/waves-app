@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\ExtractPeaks;
+use App\Models\Event;
 use App\Models\Track;
 use App\Models\User;
 use Aws\Result;
@@ -304,7 +305,7 @@ class TrackTest extends TestCase
                 'mime' => 'audio/wav',
                 'size' => 14,
             ])
-            ->assertRedirect(route('tracks.index'));
+            ->assertRedirect();
 
         $this->assertDatabaseHas('tracks', [
             'user_id' => $user->id,
@@ -314,6 +315,51 @@ class TrackTest extends TestCase
         ]);
 
         Bus::assertDispatched(ExtractPeaks::class, fn ($job) => $job->track->s3_key === $key);
+    }
+
+    public function test_store_assigns_the_track_to_an_owned_event(): void
+    {
+        $user = User::factory()->create();
+        $event = Event::factory()->for($user)->create();
+        Storage::fake('s3');
+        Bus::fake();
+
+        $key = "users/{$user->id}/in-event.wav";
+        Storage::disk('s3')->put($key, 'fake-wav-bytes');
+
+        $this->actingAs($user)
+            ->post('/tracks', [
+                's3_key' => $key,
+                'original_name' => 'in-event.wav',
+                'mime' => 'audio/wav',
+                'size' => 14,
+                'event_id' => $event->id,
+            ])
+            ->assertRedirect();
+
+        $this->assertDatabaseHas('tracks', ['s3_key' => $key, 'event_id' => $event->id]);
+    }
+
+    public function test_store_rejects_event_belonging_to_another_user(): void
+    {
+        $user = User::factory()->create();
+        $othersEvent = Event::factory()->for(User::factory())->create();
+        Storage::fake('s3');
+        Bus::fake();
+
+        $key = "users/{$user->id}/x.wav";
+        Storage::disk('s3')->put($key, 'bytes');
+
+        $this->actingAs($user)
+            ->postJson('/tracks', [
+                's3_key' => $key,
+                'original_name' => 'x.wav',
+                'mime' => 'audio/wav',
+                'size' => 14,
+                'event_id' => $othersEvent->id,
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('event_id');
     }
 
     public function test_create_multipart_returns_upload_id_scoped_to_user(): void

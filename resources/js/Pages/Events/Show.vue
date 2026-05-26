@@ -159,6 +159,41 @@ const onMediaSelected = (event) => {
     addFiles(files);
 };
 
+// --- Track uploads (audio, straight into this event) -------------------------
+const trackInput = ref(null);
+
+const { uploads: trackUploads, addFiles: addTrackFiles } = useS3Upload({
+    routes: {
+        uploadUrl: route('tracks.upload-url'),
+        multipartCreate: route('tracks.multipart.create'),
+        multipartSign: route('tracks.multipart.sign'),
+        multipartComplete: route('tracks.multipart.complete'),
+        multipartAbort: route('tracks.multipart.abort'),
+        cleanup: route('tracks.cleanup'),
+    },
+    // .wav may arrive with an empty MIME type; the server allowlist needs one.
+    initBody: (file) => ({ filename: file.name, size: file.size, content_type: file.type || 'audio/wav' }),
+    validate: (file) => /\.wav$/i.test(file.name) ? null : 'only .wav files',
+    finalize: (file, key) => new Promise((resolve, reject) => {
+        router.post(route('tracks.store'), {
+            s3_key: key,
+            original_name: file.name,
+            mime: file.type || 'audio/wav',
+            size: file.size,
+            event_id: props.event.id,
+        }, { preserveScroll: true, onSuccess: resolve, onError: reject });
+    }),
+    onUploaded: (file) => toast?.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 }),
+    onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),
+});
+
+const pickTrack = () => trackInput.value?.click();
+const onTrackSelected = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    addTrackFiles(files);
+};
+
 const confirmDeleteMedia = (item) => confirm.require({
     message: `Delete "${item.name}"? This cannot be undone.`,
     header: 'Delete media',
@@ -240,8 +275,22 @@ const openLightbox = (item) => { lightbox.value = item; };
             <section>
                 <div class="section-head">
                     <h3>Tracks</h3>
-                    <Button v-if="canEdit && assignableTracks.length" icon="pi pi-plus" label="Add tracks" size="small" text @click="showAddTracks = true" />
+                    <template v-if="canEdit">
+                        <Button icon="pi pi-upload" label="Upload track" size="small" @click="pickTrack" />
+                        <input ref="trackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onTrackSelected" />
+                        <Button v-if="assignableTracks.length" icon="pi pi-plus" label="Add existing" size="small" text @click="showAddTracks = true" />
+                    </template>
                 </div>
+
+                <Card v-if="canEdit && trackUploads.length" class="uploads">
+                    <template #content>
+                        <div v-for="u in trackUploads" :key="u.name" class="upload-row">
+                            <div class="upload-name"><i class="pi pi-cloud-upload" /> <span>{{ u.name }}</span> <Tag :value="u.status" /></div>
+                            <ProgressBar :value="u.progress" />
+                        </div>
+                    </template>
+                </Card>
+
                 <Message v-if="!tracks.length" severity="info" :closable="false">No tracks in this event yet.</Message>
                 <Card v-else>
                     <template #content>

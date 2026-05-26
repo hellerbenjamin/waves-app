@@ -298,7 +298,8 @@ class TrackController extends Controller
 
         ExtractPeaks::dispatch($track);
 
-        return redirect()->route('tracks.index');
+        // Stay on whichever page the upload came from (track list or an event).
+        return back();
     }
 
     public function destroy(Track $track): RedirectResponse
