@@ -6,7 +6,6 @@ import PublicLayout from '@/Layouts/PublicLayout.vue';
 import Button from 'primevue/button';
 import Card from 'primevue/card';
 import Tag from 'primevue/tag';
-import Message from 'primevue/message';
 import Dialog from 'primevue/dialog';
 import InputText from 'primevue/inputtext';
 import Textarea from 'primevue/textarea';
@@ -36,8 +35,6 @@ const confirm = props.canEdit ? useConfirm() : null;
 const options = computed(() => typeOptions(props.types));
 const tracks = computed(() => props.event.tracks ?? []);
 const media = computed(() => props.event.media ?? []);
-const images = computed(() => media.value.filter(m => m.kind === 'image'));
-const videos = computed(() => media.value.filter(m => m.kind === 'video'));
 
 const refresh = () => router.reload({ only: ['event', 'assignableTracks'], preserveScroll: true });
 
@@ -51,6 +48,14 @@ const formatBytes = (n) => {
     let i = 0;
     while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
     return `${n.toFixed(i ? 1 : 0)} ${u[i]}`;
+};
+
+// mm:ss for a track's playable length; null when peaks haven't been extracted yet.
+const formatDuration = (s) => {
+    if (s == null) return null;
+    const m = Math.floor(s / 60);
+    const sec = Math.round(s % 60);
+    return `${m}:${String(sec).padStart(2, '0')}`;
 };
 
 // --- Editing the event details -----------------------------------------------
@@ -255,6 +260,10 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <div class="meta">
                         <Tag :value="typeLabel(event.type)" severity="secondary" />
                         <span v-if="event.event_date">{{ formatDate(event.event_date) }}</span>
+                    </div>
+                    <div class="summary">
+                        <span><i class="pi pi-volume-up" /> {{ tracks.length }} {{ tracks.length === 1 ? 'track' : 'tracks' }}</span>
+                        <span><i class="pi pi-images" /> {{ media.length }} photos &amp; videos</span>
                         <span v-if="event.location"><i class="pi pi-map-marker" /> {{ event.location }}</span>
                     </div>
                 </div>
@@ -291,17 +300,23 @@ const openLightbox = (item) => { lightbox.value = item; };
                     </template>
                 </Card>
 
-                <Message v-if="!tracks.length" severity="info" :closable="false">No tracks in this event yet.</Message>
+                <div v-if="!tracks.length" class="empty">
+                    <i class="pi pi-volume-up" />
+                    <p>No tracks in this event yet.</p>
+                    <Button v-if="canEdit" label="Upload a track" icon="pi pi-upload" size="small" @click="pickTrack" />
+                </div>
                 <Card v-else>
                     <template #content>
                         <div class="track-list">
-                            <div v-for="track in tracks" :key="track.id" class="track-row">
+                            <div v-for="(track, i) in tracks" :key="track.id" class="track-row">
                                 <div class="track-head">
+                                    <span class="track-num">{{ i + 1 }}</span>
                                     <Link v-if="canEdit" :href="route('tracks.show', track.id)" class="track-link">{{ track.name }}</Link>
                                     <span v-else class="track-link">{{ track.name }}</span>
+                                    <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
                                     <Button v-if="canEdit" icon="pi pi-times" severity="secondary" text rounded size="small" aria-label="Remove from event" @click="removeTrack(track)" />
                                 </div>
-                                <audio v-if="track.peaks_ready || track.stream_url" :src="track.stream_url" :crossorigin="track.stream_cross_origin" controls preload="none" class="audio" />
+                                <audio v-if="track.stream_url" :src="track.stream_url" :crossorigin="track.stream_cross_origin" controls preload="none" class="audio" />
                                 <Tag v-else severity="warn" value="Processing" />
                             </div>
                         </div>
@@ -312,7 +327,7 @@ const openLightbox = (item) => { lightbox.value = item; };
             <!-- Media -->
             <section>
                 <div class="section-head">
-                    <h3>Photos &amp; videos</h3>
+                    <h3>Photos &amp; videos <span v-if="media.length" class="count-badge">{{ media.length }}</span></h3>
                     <template v-if="canEdit">
                         <Button icon="pi pi-upload" label="Upload media" size="small" @click="pickMedia" />
                         <input ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
@@ -328,35 +343,24 @@ const openLightbox = (item) => { lightbox.value = item; };
                     </template>
                 </Card>
 
-                <Message v-if="!media.length" severity="info" :closable="false">No photos or videos yet.</Message>
+                <div v-if="!media.length" class="empty">
+                    <i class="pi pi-images" />
+                    <p>No photos or videos yet.</p>
+                    <Button v-if="canEdit" label="Upload media" icon="pi pi-upload" size="small" @click="pickMedia" />
+                </div>
 
-                <div v-if="images.length" class="media-grid">
-                    <div v-for="item in images" :key="item.id" class="media-tile">
-                        <button class="thumb-btn" @click="openLightbox(item)">
-                            <img v-if="item.thumb_url || item.url" :src="item.thumb_url || item.url" :alt="item.name" loading="lazy" />
-                            <div v-else class="placeholder"><i class="pi pi-spin pi-spinner" /></div>
+                <div v-else class="media-grid">
+                    <div v-for="item in media" :key="item.id" class="media-tile">
+                        <button class="thumb-btn" @click="openLightbox(item)" :aria-label="`Open ${item.name}`">
+                            <img v-if="item.thumb_url || (item.kind === 'image' && item.url)" :src="item.thumb_url || item.url" :alt="item.name" loading="lazy" />
+                            <div v-else class="placeholder"><i :class="item.kind === 'video' ? 'pi pi-video' : 'pi pi-image'" /></div>
+                            <span v-if="item.kind === 'video'" class="play-badge"><i class="pi pi-play-circle" /></span>
                         </button>
                         <div class="tile-actions" v-if="canEdit">
                             <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
                             <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
                         </div>
                         <div v-if="item.contributor_name" class="tile-by" :title="item.contributor_name">{{ item.contributor_name }}</div>
-                    </div>
-                </div>
-
-                <div v-if="videos.length" class="video-list">
-                    <div v-for="item in videos" :key="item.id" class="video-card">
-                        <video :src="item.url" :poster="item.thumb_url || undefined" controls preload="metadata" />
-                        <div class="video-foot">
-                            <span class="video-name" :title="item.name">
-                                {{ item.name }}
-                                <em v-if="item.contributor_name" class="by"> · by {{ item.contributor_name }}</em>
-                            </span>
-                            <div class="tile-actions" v-if="canEdit">
-                                <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
-                                <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
-                            </div>
-                        </div>
                     </div>
                 </div>
             </section>
@@ -451,7 +455,10 @@ const openLightbox = (item) => { lightbox.value = item; };
 
         <!-- Image lightbox -->
         <Dialog :visible="!!lightbox" modal dismissableMask :showHeader="false" :style="{ width: 'auto', maxWidth: '92vw' }" @update:visible="lightbox = null">
-            <img v-if="lightbox" :src="lightbox.url" :alt="lightbox.name" class="lightbox-img" />
+            <template v-if="lightbox">
+                <video v-if="lightbox.kind === 'video'" :src="lightbox.url" controls autoplay class="lightbox-img" />
+                <img v-else :src="lightbox.url" :alt="lightbox.name" class="lightbox-img" />
+            </template>
         </Dialog>
     </component>
 </template>
@@ -461,17 +468,25 @@ const openLightbox = (item) => { lightbox.value = item; };
 .page-title { font-size: 1.4rem; font-weight: 600; margin: 0 0 0.4rem; }
 .meta { display: flex; align-items: center; gap: 0.9rem; font-size: 0.9rem; color: var(--p-text-muted-color); }
 .meta i { margin-right: 0.25rem; }
+.summary { display: flex; align-items: center; flex-wrap: wrap; gap: 1.1rem; margin-top: 0.5rem; font-size: 0.85rem; color: var(--p-text-muted-color); }
+.summary i { margin-right: 0.3rem; }
 .actions { display: flex; align-items: center; gap: 0.4rem; }
 .stack { display: flex; flex-direction: column; gap: 2rem; }
 .description { margin: 0; white-space: pre-wrap; color: var(--p-text-color); }
 .section-head { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
-.section-head h3 { font-size: 1.05rem; font-weight: 600; margin: 0; }
+.section-head h3 { font-size: 1.05rem; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 0.5rem; }
+.count-badge { font-size: 0.75rem; font-weight: 600; color: var(--p-text-muted-color); background: var(--p-surface-200); border-radius: 999px; padding: 0.05rem 0.5rem; }
 .track-list { display: flex; flex-direction: column; gap: 1rem; }
 .track-row { display: flex; flex-direction: column; gap: 0.4rem; }
-.track-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-.track-link { color: var(--p-primary-color); text-decoration: none; font-weight: 500; }
+.track-head { display: flex; align-items: center; gap: 0.6rem; }
+.track-num { flex: 0 0 auto; width: 1.4rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); font-size: 0.85rem; }
+.track-link { flex: 1 1 auto; min-width: 0; color: var(--p-primary-color); text-decoration: none; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-link:hover { text-decoration: underline; }
+.track-dur { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--p-text-muted-color); }
 .audio { width: 100%; height: 2.5rem; }
+.empty { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 2.5rem 1rem; border: 1px dashed var(--p-content-border-color); border-radius: 10px; color: var(--p-text-muted-color); }
+.empty i { font-size: 1.75rem; }
+.empty p { margin: 0; }
 .uploads { margin-bottom: 1rem; }
 .upload-row { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.75rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
@@ -479,16 +494,11 @@ const openLightbox = (item) => { lightbox.value = item; };
 .media-tile { position: relative; }
 .thumb-btn { display: block; width: 100%; aspect-ratio: 1; padding: 0; border: 0; border-radius: 8px; overflow: hidden; cursor: pointer; background: var(--p-surface-100); }
 .thumb-btn img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--p-text-muted-color); }
-.tile-actions { position: absolute; top: 0.25rem; right: 0.25rem; display: flex; gap: 0.15rem; background: rgba(0,0,0,0.35); border-radius: 6px; }
+.placeholder { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--p-text-muted-color); font-size: 2rem; }
+.play-badge { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 2.5rem; text-shadow: 0 2px 8px rgba(0,0,0,0.5); pointer-events: none; }
+.tile-actions { position: absolute; top: 0.25rem; right: 0.25rem; display: flex; gap: 0.15rem; background: rgba(0,0,0,0.45); border-radius: 6px; opacity: 0; transition: opacity 0.12s; }
 .tile-actions :deep(.p-button) { color: #fff; }
-.video-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); gap: 1rem; margin-top: 1rem; }
-.video-card { display: flex; flex-direction: column; gap: 0.4rem; }
-.video-card video { width: 100%; border-radius: 8px; background: #000; }
-.video-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
-.video-name { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.video-foot .tile-actions { position: static; background: transparent; }
-.video-foot .tile-actions :deep(.p-button) { color: inherit; }
+.media-tile:hover .tile-actions, .media-tile:focus-within .tile-actions { opacity: 1; }
 .lightbox-img { max-width: 90vw; max-height: 85vh; display: block; }
 .form { display: flex; flex-direction: column; gap: 1rem; }
 .field { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; }
@@ -497,7 +507,6 @@ const openLightbox = (item) => { lightbox.value = item; };
 .field-row { display: flex; gap: 1rem; }
 .full { width: 100%; }
 .optional { font-weight: 400; color: var(--p-text-muted-color); }
-.by { font-style: normal; color: var(--p-text-muted-color); }
 .tile-by { position: absolute; left: 0.35rem; bottom: 0.35rem; right: 0.35rem; font-size: 0.7rem; color: #fff; background: rgba(0,0,0,0.45); border-radius: 5px; padding: 0.1rem 0.35rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .collect-intro { margin: 0 0 1rem; color: var(--p-text-muted-color); font-size: 0.9rem; max-width: 42rem; }
 .invite-form { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
