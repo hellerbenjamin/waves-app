@@ -28,6 +28,10 @@ class ExtractPeaks implements ShouldQueue
 
     public function handle(): void
     {
+        // Queue worker enforces $timeout; PHP's own max_execution_time (30s on
+        // Forge) would otherwise kill the decode loop mid-stream.
+        set_time_limit(0);
+
         [$source, $remote] = $this->source();
 
         $probe = $this->probe($source, $remote);
