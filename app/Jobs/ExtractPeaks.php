@@ -28,29 +28,25 @@ class ExtractPeaks implements ShouldQueue
 
     public function handle(): void
     {
-        [$path, $cleanup] = $this->localPath();
+        [$source, $remote] = $this->source();
 
-        try {
-            $probe = $this->probe($path);
+        $probe = $this->probe($source, $remote);
 
-            $channels = max(1, (int) ($probe['channels'] ?? 1));
-            $sampleRate = max(1, (int) ($probe['sample_rate'] ?? 44100));
-            $duration = (float) ($probe['duration'] ?? 0.0);
+        $channels = max(1, (int) ($probe['channels'] ?? 1));
+        $sampleRate = max(1, (int) ($probe['sample_rate'] ?? 44100));
+        $duration = (float) ($probe['duration'] ?? 0.0);
 
-            $pairs = (int) max(1, min(self::MAX_PAIRS, round($duration * self::PAIRS_PER_SECOND)));
-            $totalFrames = max(1, (int) round($duration * $sampleRate));
-            $framesPerPair = max(1, (int) ceil($totalFrames / $pairs));
+        $pairs = (int) max(1, min(self::MAX_PAIRS, round($duration * self::PAIRS_PER_SECOND)));
+        $totalFrames = max(1, (int) round($duration * $sampleRate));
+        $framesPerPair = max(1, (int) ceil($totalFrames / $pairs));
 
-            $this->track->update([
-                'duration_seconds' => $duration,
-                'peaks' => [
-                    'channels' => $this->extract($path, $channels, $framesPerPair, $pairs),
-                    'sample_rate' => $sampleRate,
-                ],
-            ]);
-        } finally {
-            $cleanup();
-        }
+        $this->track->update([
+            'duration_seconds' => $duration,
+            'peaks' => [
+                'channels' => $this->extract($source, $channels, $framesPerPair, $pairs, $remote),
+                'sample_rate' => $sampleRate,
+            ],
+        ]);
     }
 
     /**
@@ -59,12 +55,16 @@ class ExtractPeaks implements ShouldQueue
      *
      * @return list<list<float>>
      */
-    private function extract(string $path, int $channels, int $framesPerPair, int $pairs): array
+    private function extract(string $path, int $channels, int $framesPerPair, int $pairs, bool $remote = false): array
     {
-        $command = [
-            'ffmpeg', '-v', 'error', '-i', $path,
-            '-map', '0:a:0', '-f', 's16le', '-acodec', 'pcm_s16le', '-',
-        ];
+        $command = array_merge(
+            ['ffmpeg', '-v', 'error'],
+            // Reading a multi-GB object straight from R2 over HTTP: ride out
+            // transient drops during the long sequential decode instead of
+            // failing the whole job.
+            $remote ? ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '30'] : [],
+            ['-i', $path, '-map', '0:a:0', '-f', 's16le', '-acodec', 'pcm_s16le', '-'],
+        );
 
         $process = proc_open(
             $command,
@@ -174,14 +174,19 @@ class ExtractPeaks implements ShouldQueue
     /**
      * @return array{channels:int,sample_rate:int,duration:float}
      */
-    private function probe(string $path): array
+    private function probe(string $path, bool $remote = false): array
     {
-        $result = Process::run([
-            'ffprobe', '-v', 'error',
-            '-select_streams', 'a:0',
-            '-show_entries', 'stream=channels,sample_rate:format=duration',
-            '-of', 'json', $path,
-        ]);
+        $result = Process::run(array_merge(
+            ['ffprobe', '-v', 'error'],
+            // ffprobe only reads the WAV header (which carries duration), but
+            // tolerate a dropped HTTP connection while it does.
+            $remote ? ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '30'] : [],
+            [
+                '-select_streams', 'a:0',
+                '-show_entries', 'stream=channels,sample_rate:format=duration',
+                '-of', 'json', $path,
+            ],
+        ));
 
         if (! $result->successful()) {
             throw new RuntimeException('ffprobe failed: '.trim($result->errorOutput()));
@@ -198,31 +203,26 @@ class ExtractPeaks implements ShouldQueue
     }
 
     /**
-     * Resolve a path ffmpeg/ffprobe can read. Local disks expose one directly;
-     * remote disks are streamed to a temp file that the caller must clean up.
+     * Resolve a URI ffmpeg/ffprobe can read, and whether it's remote. Local
+     * disks expose the file path directly. Remote disks (R2/S3) hand ffmpeg a
+     * presigned URL so it streams the object over HTTP — decoding a multi-GB
+     * file in place rather than first copying the whole thing to a temp file.
      *
-     * @return array{0:string,1:callable}
+     * @return array{0:string,1:bool} [uri, isRemote]
      */
-    private function localPath(): array
+    private function source(): array
     {
         $diskName = config('filesystems.tracks_disk');
         $disk = Storage::disk($diskName);
 
         if (config("filesystems.disks.{$diskName}.driver") === 'local') {
-            return [$disk->path($this->track->s3_key), fn () => null];
+            return [$disk->path($this->track->s3_key), false];
         }
 
-        $temp = tempnam(sys_get_temp_dir(), 'peaks_');
-        $source = $disk->readStream($this->track->s3_key);
-        $dest = fopen($temp, 'w');
+        // Sign for longer than the job can run so the URL outlasts the decode of
+        // a large file (the read is sequential and can take many minutes).
+        $url = $disk->temporaryUrl($this->track->s3_key, now()->addSeconds($this->timeout + 600));
 
-        try {
-            stream_copy_to_stream($source, $dest);
-        } finally {
-            is_resource($source) && fclose($source);
-            is_resource($dest) && fclose($dest);
-        }
-
-        return [$temp, fn () => @unlink($temp)];
+        return [$url, true];
     }
 }
