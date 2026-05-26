@@ -717,7 +717,6 @@ onBeforeUnmount(() => {
                         @blur="saveName"
                         @keyup.enter="$event.target.blur()"
                     />
-                    <i class="pi pi-pencil title-edit-icon" />
                 </div>
                 <h2 v-else class="page-title">{{ trackName }}</h2>
                 <Tag v-if="!canEdit" value="Shared" severity="info" />
@@ -835,7 +834,7 @@ onBeforeUnmount(() => {
                     </div>
                 </template>
                 <template #content>
-                    <p v-if="canEdit" class="mixer-hint"><i class="pi pi-pencil" /> Click a channel name to rename it</p>
+                    <p v-if="canEdit" class="mixer-hint">Click a channel name to rename it</p>
                     <div class="mixer">
                         <div v-for="(lvl, i) in levels" :key="i" class="fader" :class="{ muted: muted[i] }">
                             <span class="fader-val">{{ muted[i] ? '—' : `${lvl}%` }}</span>
@@ -869,7 +868,6 @@ onBeforeUnmount(() => {
                                     @keyup.enter="$event.target.blur()"
                                     @keydown.tab="focusAdjacentLabel($event, i)"
                                 />
-                                <i class="pi pi-pencil label-edit-icon" />
                             </div>
                             <span v-else class="fader-label">{{ labels[i] || channelLabel(i, levels.length) }}</span>
 
@@ -1075,7 +1073,7 @@ onBeforeUnmount(() => {
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 0.25rem 1.75rem 0.25rem 0.5rem;
+    padding: 0.25rem 0.5rem;
     transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
 .page-title-input:hover { border-color: var(--p-content-border-color); }
@@ -1085,19 +1083,6 @@ onBeforeUnmount(() => {
     border-color: var(--p-primary-color);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--p-primary-color) 25%, transparent);
 }
-.title-edit-icon {
-    position: absolute;
-    right: 0.5rem;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.75rem;
-    color: var(--p-text-muted-color);
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 0.15s;
-}
-.title-field:hover .title-edit-icon,
-.page-title-input:focus + .title-edit-icon { opacity: 1; }
 .back-link { display: inline-flex; align-items: center; gap: 0.375rem; color: var(--p-text-muted-color); text-decoration: none; font-size: 0.875rem; }
 .back-link:hover { color: var(--p-text-color); }
 .stack { display: flex; flex-direction: column; gap: 1.5rem; }
@@ -1146,7 +1131,7 @@ onBeforeUnmount(() => {
     background: var(--p-content-background);
     border: 1px solid var(--p-content-border-color);
     border-radius: 6px;
-    padding: 0.3rem 1rem;
+    padding: 0.3rem 0.4rem;
     transition: border-color 0.15s, box-shadow 0.15s;
 }
 .fader-label-input::placeholder { color: var(--p-text-muted-color); font-weight: 500; font-style: italic; }
@@ -1156,17 +1141,6 @@ onBeforeUnmount(() => {
     border-color: var(--p-primary-color);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--p-primary-color) 25%, transparent);
 }
-.label-edit-icon {
-    position: absolute;
-    right: 0.4rem;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 0.6875rem;
-    color: var(--p-text-muted-color);
-    pointer-events: none;
-    transition: color 0.15s;
-}
-.fader-label-input:focus + .label-edit-icon { color: var(--p-primary-color); }
 .mixer-hint {
     display: flex;
     align-items: center;
