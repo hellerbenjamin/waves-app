@@ -120,15 +120,14 @@ class SplitTrackSegment implements ShouldQueue
     }
 
     /**
-     * Default file name: "{parent base} - {region name}.wav". Stays a sane
-     * fallback if the user hasn't renamed regions; they can still rename the
-     * child track after the fact.
+     * Default file name: just "{region name}.wav". The parent name is
+     * deliberately not prepended — region names are already chosen to identify
+     * the song, and prefixing the show/source name only makes the track list
+     * harder to scan.
      */
     private function childName(string $regionName): string
     {
-        $parentBase = preg_replace('/\.[^.]+$/', '', (string) $this->parent->original_name) ?: 'Track';
-
-        return $parentBase.' - '.$regionName.'.wav';
+        return $regionName.'.wav';
     }
 
     /** @return array{0:string,1:bool} */

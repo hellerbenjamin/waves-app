@@ -49,13 +49,16 @@ class DetectSongs implements ShouldQueue
         ));
 
         // Re-index with stable client-side ids and default names so the UI has
-        // something to render before the user renames anything.
+        // something to render before the user renames anything. The parent's
+        // base name is prepended as a suggestion ("Show - Part 1"); the user
+        // can keep, edit, or wipe it from the region input before committing.
+        $prefix = preg_replace('/\.[^.]+$/', '', (string) $this->track->original_name) ?: '';
         $regions = array_map(
             fn ($r, $i) => [
                 'id' => 'r'.($i + 1),
                 'start' => round($r['start'], 3),
                 'end' => round($r['end'], 3),
-                'name' => 'Part '.($i + 1),
+                'name' => ($prefix !== '' ? $prefix.' - ' : '').'Part '.($i + 1),
             ],
             $regions,
             array_keys($regions),

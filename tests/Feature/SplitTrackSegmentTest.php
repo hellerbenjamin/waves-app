@@ -52,7 +52,7 @@ class SplitTrackSegmentTest extends TestCase
 
         $child = $parent->children()->first();
         $this->assertNotNull($child);
-        $this->assertSame('show - Song A.wav', $child->original_name);
+        $this->assertSame('Song A.wav', $child->original_name);
         $this->assertSame($parent->id, $child->parent_track_id);
         $this->assertSame($user->id, $child->user_id);
         $this->assertTrue(Storage::disk('local')->exists($child->s3_key));

@@ -38,6 +38,7 @@ class DetectSongsTest extends TestCase
 
         $track = Track::factory()->for($user)->create([
             's3_key' => $key,
+            'original_name' => 'show.wav',
             'peaks' => ['channels' => [], 'sample_rate' => 44100],
             'duration_seconds' => 8.0,
         ]);
@@ -54,7 +55,8 @@ class DetectSongsTest extends TestCase
         $this->assertGreaterThan(0.5, $regions[1]['start'] - $regions[0]['end']);
 
         foreach ($regions as $i => $r) {
-            $this->assertSame('Part '.($i + 1), $r['name']);
+            // Parent base is prepended as a suggested name the user can edit.
+            $this->assertSame('show - Part '.($i + 1), $r['name']);
             $this->assertGreaterThan($r['start'], $r['end']);
         }
     }
