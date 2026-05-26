@@ -141,6 +141,13 @@ class TrackController extends Controller
         return $this->storage->streamResponse($track);
     }
 
+    public function download(Track $track): SymfonyResponse
+    {
+        $this->authorize('view', $track);
+
+        return $this->storage->downloadResponse($track);
+    }
+
     public function streamShared(Track $track): SymfonyResponse
     {
         return $this->storage->streamResponse($track);

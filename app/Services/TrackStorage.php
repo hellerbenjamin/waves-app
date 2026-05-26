@@ -113,6 +113,39 @@ class TrackStorage
     }
 
     /**
+     * Build a download response for a track: presign an S3 GET that forces
+     * Content-Disposition: attachment with the original filename, or fall back
+     * to a streamed file download on a local disk.
+     */
+    public function downloadResponse(Track $track): SymfonyResponse
+    {
+        $filename = $track->original_name ?: ('track-'.$track->id.'.wav');
+
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl(
+                $track->s3_key,
+                now()->addMinutes(15),
+                [
+                    'ResponseContentDisposition' => 'attachment; filename="'.addslashes($filename).'"',
+                    'ResponseContentType' => $track->mime ?: 'audio/wav',
+                ],
+            ));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($track->s3_key), 404);
+
+        return response()->download(
+            $disk->path($track->s3_key),
+            $filename,
+            ['Content-Type' => $track->mime ?: 'audio/wav'],
+        );
+    }
+
+    /**
      * The crossorigin mode the audio element must use for playbackUrl().
      * Presigned S3 URLs carry no cookies, so they load anonymously; the local
      * route is cookie-authenticated and same-origin, so it sends credentials.

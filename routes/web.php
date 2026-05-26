@@ -68,6 +68,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/tracks', [TrackController::class, 'index'])->name('tracks.index');
     Route::get('/tracks/{track}', [TrackController::class, 'show'])->name('tracks.show');
     Route::get('/tracks/{track}/stream', [TrackController::class, 'stream'])->name('tracks.stream');
+    Route::get('/tracks/{track}/download', [TrackController::class, 'download'])->name('tracks.download');
     Route::patch('/tracks/{track}', [TrackController::class, 'update'])->name('tracks.update');
     Route::post('/tracks/upload-url', [TrackController::class, 'uploadUrl'])->name('tracks.upload-url');
     Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');

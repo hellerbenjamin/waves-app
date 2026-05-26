@@ -441,7 +441,17 @@ onBeforeUnmount(() => {
                 <Tag v-if="!canEdit" value="Shared" severity="info" />
                 <Button
                     v-if="canEdit"
-                    class="share-btn"
+                    class="download-btn"
+                    icon="pi pi-download"
+                    label="Download"
+                    severity="secondary"
+                    outlined
+                    size="small"
+                    :as="'a'"
+                    :href="route('tracks.download', track.id)"
+                />
+                <Button
+                    v-if="canEdit"
                     :icon="shareUrl ? 'pi pi-link' : 'pi pi-share-alt'"
                     :label="shareUrl ? 'Sharing' : 'Share'"
                     :severity="shareUrl ? 'success' : 'secondary'"
@@ -710,7 +720,7 @@ onBeforeUnmount(() => {
 .save-dialog label { font-size: 0.875rem; font-weight: 500; }
 .save-dialog .p-inputtext { width: 100%; }
 .save-dialog-hint { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--p-text-muted-color); }
-.share-btn { margin-left: auto; }
+.download-btn { margin-left: auto; }
 .share-dialog { display: flex; flex-direction: column; gap: 0.75rem; }
 .share-dialog-hint { margin: 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
 .share-link-row { display: flex; gap: 0.5rem; }
