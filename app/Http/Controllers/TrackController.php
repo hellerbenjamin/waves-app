@@ -28,14 +28,19 @@ class TrackController extends Controller
         $tracks = $request->user()
             ->tracks()
             ->with('event:id,name')
+            // Select a cheap readiness flag rather than the peaks JSON itself —
+            // that payload is huge for multi-GB tracks and would blow MySQL's
+            // sort buffer when this list is ordered (see Track::scopeForCards).
+            ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'created_at'])
+            ->selectRaw('peaks is not null as peaks_ready')
             ->latest()
-            ->get(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'peaks', 'created_at'])
+            ->get()
             ->map(fn (Track $t) => [
                 'id' => $t->id,
                 'name' => $t->original_name,
                 'size' => $t->size,
                 'duration_seconds' => $t->duration_seconds,
-                'peaks_ready' => $t->peaks !== null,
+                'peaks_ready' => $t->peaks_ready,
                 'event_id' => $t->event_id,
                 'event' => $t->event ? ['id' => $t->event->id, 'name' => $t->event->name] : null,
                 'created_at' => $t->created_at?->toIso8601String(),

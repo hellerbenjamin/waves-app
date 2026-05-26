@@ -69,7 +69,7 @@ class EventController extends Controller
         $this->authorize('view', $event);
 
         $event->load([
-            'tracks' => fn ($q) => $q->latest(),
+            'tracks' => fn ($q) => $q->forCards()->latest(),
             'media' => fn ($q) => $q->latest(),
             'invites' => fn ($q) => $q->whereNull('revoked_at')->latest(),
         ]);
@@ -89,7 +89,7 @@ class EventController extends Controller
 
     public function showShared(Event $event): Response
     {
-        $event->load(['tracks' => fn ($q) => $q->latest(), 'media' => fn ($q) => $q->latest()]);
+        $event->load(['tracks' => fn ($q) => $q->forCards()->latest(), 'media' => fn ($q) => $q->latest()]);
 
         return Inertia::render('Events/Show', [
             'canEdit' => false,

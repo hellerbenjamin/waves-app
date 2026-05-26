@@ -63,3 +63,8 @@ This project runs under **ddev** (PHP 8.4, Node 24, MariaDB 11.8). Run tooling
 - Keep controllers thin; storage/IO logic lives in the `Services`.
 - New Inertia pages go under `resources/js/Pages/<Area>/`; shared public pages
   render under `PublicLayout`, authenticated ones under `AuthenticatedLayout`.
+
+## Git
+
+- Committing directly to `master` is fine in this repo — no feature branch
+  required. Still only commit/push when asked.

@@ -57,7 +57,7 @@ class PublicProfileController extends Controller
     {
         abort_unless($event->user_id === $user->id, 404);
 
-        $event->load(['tracks' => fn ($q) => $q->latest(), 'media' => fn ($q) => $q->latest()]);
+        $event->load(['tracks' => fn ($q) => $q->forCards()->latest(), 'media' => fn ($q) => $q->latest()]);
 
         return Inertia::render('Events/Show', [
             'canEdit' => false,

@@ -58,7 +58,7 @@ class EventPresenter
             'id' => $track->id,
             'name' => $track->original_name,
             'duration_seconds' => $track->duration_seconds,
-            'peaks_ready' => $track->peaks !== null,
+            'peaks_ready' => $track->peaks_ready,
             'stream_url' => $this->tracks->playbackUrl($track, ($ctx->trackStream)($track), $ctx->shared),
             'stream_cross_origin' => $this->tracks->streamCrossOrigin(),
         ];
