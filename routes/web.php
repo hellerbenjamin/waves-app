@@ -85,6 +85,14 @@ Route::middleware('auth')->group(function () {
     Route::post('/tracks/{track}/share', [TrackController::class, 'share'])->name('tracks.share');
     Route::delete('/tracks/{track}/share', [TrackController::class, 'unshare'])->name('tracks.unshare');
 
+    // Song-boundary detection and committing the resulting split. The proposal
+    // lives on the parent track between detect and commit; children are
+    // independent rows once written.
+    Route::post('/tracks/{track}/detect-songs', [TrackController::class, 'detectSongs'])->name('tracks.detect-songs');
+    Route::patch('/tracks/{track}/split-proposal', [TrackController::class, 'updateSplitProposal'])->name('tracks.split-proposal.update');
+    Route::delete('/tracks/{track}/split-proposal', [TrackController::class, 'deleteSplitProposal'])->name('tracks.split-proposal.destroy');
+    Route::post('/tracks/{track}/split', [TrackController::class, 'commitSplit'])->name('tracks.split');
+
     Route::post('/channel-templates', [ChannelTemplateController::class, 'store'])->name('channel-templates.store');
     Route::delete('/channel-templates/{channelTemplate}', [ChannelTemplateController::class, 'destroy'])->name('channel-templates.destroy');
 

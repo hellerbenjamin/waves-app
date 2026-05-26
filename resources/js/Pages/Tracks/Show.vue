@@ -12,6 +12,7 @@ import Select from 'primevue/select';
 import Dialog from 'primevue/dialog';
 import InputText from 'primevue/inputtext';
 import WaveSurfer from 'wavesurfer.js';
+import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 
 const props = defineProps({
     track: { type: Object, required: true },
@@ -51,6 +52,8 @@ let audioCtx = null;
 let gainNodes = [];
 let panners = [];
 let pollTimer = null;
+let regions = null; // wavesurfer Regions plugin instance
+let suppressRegionEvents = false; // guard against feedback loops during sync
 
 const channelCount = () => props.track.peaks?.channels?.length ?? 0;
 
@@ -347,6 +350,8 @@ const initWaveform = async () => {
     if (corsOk) audio.crossOrigin = props.track.stream_cross_origin;
     audio.src = props.track.stream_url;
 
+    regions = RegionsPlugin.create();
+
     ws = WaveSurfer.create({
         container: waveformEl.value,
         media: audio,
@@ -362,7 +367,12 @@ const initWaveform = async () => {
         barGap: 1,
         barRadius: 2,
         normalize: false,
+        plugins: [regions],
     });
+
+    // Drag on empty waveform space to add a new region. Disabled until the
+    // user is actively staging a split (otherwise plain seeking is impaired).
+    bindRegionEvents();
 
     setupMixer(audio, channels, corsOk);
 
@@ -372,7 +382,217 @@ const initWaveform = async () => {
     ws.on('finish', () => { isPlaying.value = false; });
     ws.on('timeupdate', (t) => { currentTime.value = t; });
     ws.on('error', (e) => { loadError.value = e?.message || String(e); });
+    ws.on('ready', () => {
+        syncRegionsToWaveform();
+        enableRegionCreate(proposal.value?.status === 'ready');
+        // Keep the detection-poll alive if the page loaded mid-detection.
+        if (proposal.value?.status === 'detecting') startDetectPolling();
+    });
 };
+
+// Split-into-songs UI state. `proposal` mirrors the server's split_proposal:
+// when it's null there's no staging in progress. The sliders feed the next
+// detection run; we also persist them locally to the proposal between runs
+// so reopening the page restores what the user was tweaking.
+const proposal = ref(props.track.split_proposal ?? null);
+const children = ref([...(props.track.children ?? [])]);
+const splitBusy = ref(false);
+const splitDb = ref(props.track.split_proposal?.params?.silence_db ?? -40);
+const splitMinSilence = ref(props.track.split_proposal?.params?.min_silence ?? 1.5);
+const splitMinRegion = ref(props.track.split_proposal?.params?.min_region ?? 30);
+let detectPoll = null;
+let saveProposalTimer = null;
+
+const splitActive = () => proposal.value && proposal.value.status === 'ready' && (proposal.value.regions?.length || 0) >= 0;
+
+const regionColor = (i) => {
+    // Alternating translucent fills so adjacent regions stay visually distinct
+    // over the waveform.
+    const palette = [
+        'rgba(99, 102, 241, 0.20)',
+        'rgba(16, 185, 129, 0.20)',
+        'rgba(244, 114, 182, 0.20)',
+        'rgba(245, 158, 11, 0.20)',
+    ];
+    return palette[i % palette.length];
+};
+
+// Push the proposal's regions onto the waveform. Recreates the set on every
+// sync so deletes and renames stay consistent; suppressed events keep this
+// from echoing back as fake user edits.
+const syncRegionsToWaveform = () => {
+    if (!regions || !ws) return;
+    suppressRegionEvents = true;
+    try {
+        regions.clearRegions();
+        if (!proposal.value || proposal.value.status !== 'ready') return;
+        (proposal.value.regions ?? []).forEach((r, i) => {
+            regions.addRegion({
+                id: r.id,
+                start: r.start,
+                end: r.end,
+                content: r.name,
+                color: regionColor(i),
+                drag: true,
+                resize: true,
+            });
+        });
+    } finally {
+        suppressRegionEvents = false;
+    }
+};
+
+const bindRegionEvents = () => {
+    if (!regions) return;
+
+    // User dragged an edge or the whole region.
+    regions.on('region-updated', (region) => {
+        if (suppressRegionEvents || !proposal.value) return;
+        const target = (proposal.value.regions ?? []).find((r) => r.id === region.id);
+        if (!target) return;
+        target.start = Number(region.start.toFixed(3));
+        target.end = Number(region.end.toFixed(3));
+        scheduleProposalSave();
+    });
+
+    // Drag-to-create on empty space (toggled on only while staging a split).
+    regions.on('region-created', (region) => {
+        if (suppressRegionEvents || !proposal.value) return;
+        // Skip rebuilds we triggered ourselves in syncRegionsToWaveform.
+        if ((proposal.value.regions ?? []).some((r) => r.id === region.id)) return;
+        const existing = proposal.value.regions ?? [];
+        const id = 'r' + Date.now();
+        const name = `Part ${existing.length + 1}`;
+        region.setOptions({ id, content: name, color: regionColor(existing.length) });
+        proposal.value.regions = [
+            ...existing,
+            { id, start: Number(region.start.toFixed(3)), end: Number(region.end.toFixed(3)), name },
+        ];
+        scheduleProposalSave();
+    });
+};
+
+// Toggle drag-to-create on the waveform body. Off during normal playback so a
+// click still seeks; on while the user is staging a split. The plugin's
+// enableDragSelection() returns an unsubscribe fn we hold onto.
+let regionDragUnsub = null;
+const enableRegionCreate = (on) => {
+    if (!regions) return;
+    regionDragUnsub?.();
+    regionDragUnsub = null;
+    if (on) {
+        regionDragUnsub = regions.enableDragSelection({
+            color: 'rgba(99, 102, 241, 0.15)',
+        });
+    }
+};
+
+const scheduleProposalSave = () => {
+    clearTimeout(saveProposalTimer);
+    saveProposalTimer = setTimeout(saveProposal, 400);
+};
+
+const saveProposal = async () => {
+    if (!proposal.value) return;
+    try {
+        await apiFetch(route('tracks.split-proposal.update', props.track.id), {
+            method: 'PATCH',
+            body: { regions: proposal.value.regions ?? [] },
+        });
+    } catch (e) {
+        // Surface nothing to the user — they'll see stale state and retry by
+        // dragging again. A persistent failure shows up as the next reload.
+    }
+};
+
+const startDetect = async () => {
+    splitBusy.value = true;
+    try {
+        const res = await apiFetch(route('tracks.detect-songs', props.track.id), {
+            method: 'POST',
+            body: {
+                silence_db: splitDb.value,
+                min_silence: splitMinSilence.value,
+                min_region: splitMinRegion.value,
+            },
+        });
+        if (!res.ok) throw new Error('detect failed');
+        proposal.value = (await res.json()).split_proposal;
+        startDetectPolling();
+    } catch (e) {
+        // ignore — user can retry
+    } finally {
+        splitBusy.value = false;
+    }
+};
+
+const startDetectPolling = () => {
+    clearInterval(detectPoll);
+    detectPoll = setInterval(() => {
+        router.reload({ only: ['track'], preserveScroll: true });
+    }, 3000);
+};
+
+const removeRegion = (id) => {
+    if (!proposal.value) return;
+    proposal.value.regions = (proposal.value.regions ?? []).filter((r) => r.id !== id);
+    syncRegionsToWaveform();
+    scheduleProposalSave();
+};
+
+const renameRegion = (id, name) => {
+    if (!proposal.value) return;
+    const r = (proposal.value.regions ?? []).find((x) => x.id === id);
+    if (!r) return;
+    r.name = name;
+    // Update the on-waveform label without rebuilding all regions.
+    regions?.getRegions().find((rr) => rr.id === id)?.setOptions({ content: name });
+    scheduleProposalSave();
+};
+
+const discardProposal = async () => {
+    try {
+        await apiFetch(route('tracks.split-proposal.destroy', props.track.id), { method: 'DELETE' });
+        proposal.value = null;
+        syncRegionsToWaveform();
+    } catch (e) {
+        // ignore
+    }
+};
+
+const commitSplit = async () => {
+    splitBusy.value = true;
+    try {
+        const res = await apiFetch(route('tracks.split', props.track.id), { method: 'POST', body: {} });
+        if (!res.ok) throw new Error('split failed');
+        proposal.value = null;
+        syncRegionsToWaveform();
+        // Children land asynchronously; reload until the count stops climbing.
+        router.reload({ only: ['track'], preserveScroll: true });
+    } catch (e) {
+        // ignore
+    } finally {
+        splitBusy.value = false;
+    }
+};
+
+// Mirror server state into local refs whenever Inertia partial-reloads.
+watch(() => props.track.split_proposal, (next) => {
+    proposal.value = next ?? null;
+    if (!next || next.status !== 'detecting') {
+        clearInterval(detectPoll);
+        detectPoll = null;
+    }
+    syncRegionsToWaveform();
+    enableRegionCreate(!!next && next.status === 'ready');
+}, { deep: true });
+
+watch(() => props.track.children, (next) => {
+    children.value = [...(next ?? [])];
+}, { deep: true });
+
+const formatDurationShort = formatTime;
+
 
 const togglePlay = () => ws?.playPause();
 
@@ -403,7 +623,12 @@ watch(() => props.track.peaks_ready, (ready) => {
 
 onBeforeUnmount(() => {
     clearInterval(pollTimer);
+    clearInterval(detectPoll);
     clearTimeout(savedTimer);
+    clearTimeout(saveProposalTimer);
+    regionDragUnsub?.();
+    regionDragUnsub = null;
+    regions = null;
     ws?.destroy();
     ws = null;
     audioCtx?.close();
@@ -597,6 +822,112 @@ onBeforeUnmount(() => {
                 Per-channel faders aren't available for this audio source (the browser couldn't access its channels).
             </Message>
 
+            <Card v-if="canEdit && track.peaks_ready">
+                <template #title>
+                    <div class="split-header">
+                        <span class="split-title">Split into songs</span>
+                        <span v-if="proposal?.status === 'detecting'" class="split-status">
+                            <i class="pi pi-spin pi-spinner" /> Detecting…
+                        </span>
+                    </div>
+                </template>
+                <template #content>
+                    <p class="split-hint">
+                        ffmpeg looks for silence to guess where songs begin and end. Tune the thresholds, then drag the
+                        edges of each region on the waveform above to fine-tune. Drag on empty waveform space to add a new
+                        region.
+                    </p>
+
+                    <div class="split-params">
+                        <div class="split-param">
+                            <label>Silence threshold <span class="split-param-val">{{ splitDb }} dB</span></label>
+                            <Slider v-model="splitDb" :min="-80" :max="-10" :step="1" />
+                            <p class="split-param-hint">Anything quieter than this counts as silence.</p>
+                        </div>
+                        <div class="split-param">
+                            <label>Min silence length <span class="split-param-val">{{ splitMinSilence }} s</span></label>
+                            <Slider v-model="splitMinSilence" :min="0.2" :max="10" :step="0.1" />
+                            <p class="split-param-hint">Ignore quiet stretches shorter than this.</p>
+                        </div>
+                        <div class="split-param">
+                            <label>Min song length <span class="split-param-val">{{ splitMinRegion }} s</span></label>
+                            <Slider v-model="splitMinRegion" :min="1" :max="600" :step="1" />
+                            <p class="split-param-hint">Drop candidate songs shorter than this.</p>
+                        </div>
+                    </div>
+
+                    <div class="split-actions">
+                        <Button
+                            :icon="proposal?.status === 'detecting' ? 'pi pi-spin pi-spinner' : 'pi pi-search'"
+                            :label="proposal?.regions?.length ? 'Re-detect' : 'Detect songs'"
+                            :disabled="splitBusy || proposal?.status === 'detecting'"
+                            @click="startDetect"
+                        />
+                        <Button
+                            v-if="proposal?.status === 'ready' && proposal?.regions?.length"
+                            label="Commit split"
+                            icon="pi pi-check"
+                            severity="success"
+                            :loading="splitBusy"
+                            @click="commitSplit"
+                        />
+                        <Button
+                            v-if="proposal?.regions?.length"
+                            label="Discard"
+                            text
+                            severity="secondary"
+                            @click="discardProposal"
+                        />
+                    </div>
+
+                    <div v-if="proposal?.regions?.length" class="region-list">
+                        <div v-for="(r, i) in proposal.regions" :key="r.id" class="region-row">
+                            <span class="region-index">{{ i + 1 }}</span>
+                            <InputText
+                                :model-value="r.name"
+                                class="region-name"
+                                @update:model-value="(v) => renameRegion(r.id, v)"
+                            />
+                            <span class="region-times">
+                                {{ formatDurationShort(r.start) }} – {{ formatDurationShort(r.end) }}
+                                <span class="region-len">({{ formatDurationShort(r.end - r.start) }})</span>
+                            </span>
+                            <Button
+                                icon="pi pi-trash"
+                                text
+                                rounded
+                                severity="danger"
+                                size="small"
+                                aria-label="Remove region"
+                                @click="removeRegion(r.id)"
+                            />
+                        </div>
+                    </div>
+                    <p v-else-if="proposal?.status === 'ready'" class="split-empty">
+                        No regions long enough were found. Lower the minimum song length or the silence threshold.
+                    </p>
+                </template>
+            </Card>
+
+            <Card v-if="children.length">
+                <template #title>
+                    <span class="split-title">Split from this track</span>
+                </template>
+                <template #content>
+                    <ul class="child-list">
+                        <li v-for="c in children" :key="c.id" class="child-row">
+                            <Link :href="route('tracks.show', c.id)" class="child-name">{{ c.name }}</Link>
+                            <span class="child-time">{{ formatDurationShort(c.duration_seconds) }}</span>
+                            <Tag
+                                v-if="!c.peaks_ready"
+                                value="Processing"
+                                severity="warn"
+                            />
+                        </li>
+                    </ul>
+                </template>
+            </Card>
+
             <Card>
                 <template #content>
                     <dl class="meta">
@@ -775,6 +1106,37 @@ onBeforeUnmount(() => {
 .pan-slider { width: 100%; }
 .pan-val { background: none; border: none; padding: 0; cursor: pointer; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
 .pan-val:hover { color: var(--p-text-color); }
+
+.split-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.split-title { font-size: 1rem; font-weight: 600; }
+.split-status { font-size: 0.8125rem; color: var(--p-text-muted-color); display: inline-flex; align-items: center; gap: 0.375rem; }
+.split-hint { margin: 0 0 1rem; font-size: 0.875rem; color: var(--p-text-muted-color); }
+.split-params { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1.25rem; margin-bottom: 1rem; }
+.split-param label { display: flex; justify-content: space-between; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.5rem; }
+.split-param-val { color: var(--p-primary-color); font-variant-numeric: tabular-nums; }
+.split-param-hint { margin: 0.5rem 0 0; font-size: 0.75rem; color: var(--p-text-muted-color); }
+.split-actions { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 1rem; }
+.split-empty { margin: 0.5rem 0 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
+.region-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.region-row {
+    display: grid;
+    grid-template-columns: 1.5rem 1fr auto auto;
+    gap: 0.75rem;
+    align-items: center;
+    padding: 0.375rem 0;
+    border-bottom: 1px solid var(--p-content-border-color);
+}
+.region-row:last-child { border-bottom: none; }
+.region-index { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; }
+.region-name { width: 100%; }
+.region-times { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.region-len { opacity: 0.7; margin-left: 0.25rem; }
+.child-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.child-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.375rem 0; border-bottom: 1px solid var(--p-content-border-color); }
+.child-row:last-child { border-bottom: none; }
+.child-name { flex: 1; color: var(--p-text-color); text-decoration: none; font-weight: 500; }
+.child-name:hover { color: var(--p-primary-color); }
+.child-time { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; }
 
 .meta { margin: 0; display: grid; gap: 0.875rem; }
 .meta-row { display: flex; justify-content: space-between; align-items: center; }

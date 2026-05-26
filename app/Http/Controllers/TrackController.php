@@ -5,7 +5,9 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreTrackRequest;
 use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
+use App\Jobs\DetectSongs;
 use App\Jobs\ExtractPeaks;
+use App\Jobs\SplitTrackSegment;
 use App\Models\Track;
 use App\Services\TrackStorage;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
@@ -167,6 +169,19 @@ class TrackController extends Controller
             'peaks' => $track->peaks,
             'channel_labels' => $track->channel_labels,
             'peaks_ready' => $track->peaks !== null,
+            'split_proposal' => $shared ? null : $track->split_proposal,
+            'children' => $shared ? [] : $track->children()
+                ->select(['id', 'original_name', 'duration_seconds'])
+                ->selectRaw('peaks is not null as peaks_ready')
+                ->orderBy('id')
+                ->get()
+                ->map(fn (Track $c) => [
+                    'id' => $c->id,
+                    'name' => $c->original_name,
+                    'duration_seconds' => $c->duration_seconds,
+                    'peaks_ready' => (bool) $c->peaks_ready,
+                ])
+                ->all(),
             'created_at' => $track->created_at?->toIso8601String(),
             'stream_url' => $this->storage->playbackUrl($track, $streamUrl, $shared),
             // How the player must load the stream so it stays CORS-clean for
@@ -312,6 +327,114 @@ class TrackController extends Controller
 
         // Stay on whichever page the upload came from (track list or an event).
         return back();
+    }
+
+    /**
+     * Run silence detection against the track and stage a proposal the user
+     * can review and edit. Detection params come from the UI sliders; sensible
+     * floors keep a stray value from producing a useless analysis.
+     */
+    public function detectSongs(Request $request, Track $track): JsonResponse
+    {
+        $this->authorize('update', $track);
+        abort_unless($track->peaks !== null, 422, 'Track is still processing.');
+
+        $validated = $request->validate([
+            'silence_db' => ['nullable', 'numeric', 'between:-80,-10'],
+            'min_silence' => ['nullable', 'numeric', 'between:0.2,30'],
+            'min_region' => ['nullable', 'numeric', 'between:1,3600'],
+        ]);
+
+        // Stash the params and a 'detecting' status synchronously so the UI's
+        // poll sees the job is in flight rather than a stale 'ready' proposal.
+        $track->update([
+            'split_proposal' => [
+                'status' => 'detecting',
+                'params' => [
+                    'silence_db' => (float) ($validated['silence_db'] ?? -40),
+                    'min_silence' => (float) ($validated['min_silence'] ?? 1.5),
+                    'min_region' => (float) ($validated['min_region'] ?? 30),
+                ],
+                'regions' => $track->split_proposal['regions'] ?? [],
+            ],
+        ]);
+
+        DetectSongs::dispatch(
+            $track,
+            (float) ($validated['silence_db'] ?? -40),
+            (float) ($validated['min_silence'] ?? 1.5),
+            (float) ($validated['min_region'] ?? 30),
+        );
+
+        return response()->json(['split_proposal' => $track->split_proposal]);
+    }
+
+    /**
+     * Persist edits to the staged proposal (region edges, names, deletions).
+     * Validates each region's bounds; the UI debounces calls so a drag becomes
+     * a single save.
+     */
+    public function updateSplitProposal(Request $request, Track $track): JsonResponse
+    {
+        $this->authorize('update', $track);
+
+        $validated = $request->validate([
+            'regions' => ['present', 'array'],
+            'regions.*.id' => ['nullable', 'string', 'max:32'],
+            'regions.*.start' => ['required', 'numeric', 'min:0'],
+            'regions.*.end' => ['required', 'numeric', 'gt:regions.*.start'],
+            'regions.*.name' => ['nullable', 'string', 'max:120'],
+        ]);
+
+        $proposal = $track->split_proposal ?: ['status' => 'ready', 'params' => null];
+        $proposal['regions'] = array_map(
+            fn ($r, $i) => [
+                'id' => $r['id'] ?? ('r'.($i + 1)),
+                'start' => round((float) $r['start'], 3),
+                'end' => round((float) $r['end'], 3),
+                'name' => trim((string) ($r['name'] ?? '')) ?: ('Part '.($i + 1)),
+            ],
+            $validated['regions'],
+            array_keys($validated['regions']),
+        );
+
+        $track->update(['split_proposal' => $proposal]);
+
+        return response()->json(['split_proposal' => $track->split_proposal]);
+    }
+
+    /** Discard a staged proposal entirely. */
+    public function deleteSplitProposal(Track $track): SymfonyResponse
+    {
+        $this->authorize('update', $track);
+
+        $track->update(['split_proposal' => null]);
+
+        return response()->noContent();
+    }
+
+    /**
+     * Commit the proposal: enqueue one split job per region. Returns
+     * immediately; children appear in the parent's `children` list as jobs
+     * finish.
+     */
+    public function commitSplit(Request $request, Track $track): JsonResponse
+    {
+        $this->authorize('update', $track);
+        abort_unless($track->peaks !== null, 422, 'Track is still processing.');
+
+        $regions = $track->split_proposal['regions'] ?? [];
+        abort_if(empty($regions), 422, 'No regions to split.');
+
+        foreach ($regions as $region) {
+            SplitTrackSegment::dispatch($track, $region);
+        }
+
+        // Clear the proposal: it's no longer the source of truth — the spawned
+        // children are. A re-run starts from a fresh detect.
+        $track->update(['split_proposal' => null]);
+
+        return response()->json(['queued' => count($regions)]);
     }
 
     public function destroy(Track $track): RedirectResponse

@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Track extends Model
 {
@@ -15,6 +16,7 @@ class Track extends Model
     protected $fillable = [
         'user_id',
         'event_id',
+        'parent_track_id',
         's3_key',
         'original_name',
         'mime',
@@ -24,11 +26,13 @@ class Track extends Model
         'channel_labels',
         'duration_seconds',
         'share_token',
+        'split_proposal',
     ];
 
     protected $casts = [
         'peaks' => 'array',
         'channel_labels' => 'array',
+        'split_proposal' => 'array',
         'size' => 'integer',
         'duration_seconds' => 'float',
     ];
@@ -41,6 +45,17 @@ class Track extends Model
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class);
+    }
+
+    public function parent(): BelongsTo
+    {
+        return $this->belongsTo(Track::class, 'parent_track_id');
+    }
+
+    /** Children created by splitting this track. */
+    public function children(): HasMany
+    {
+        return $this->hasMany(Track::class, 'parent_track_id');
     }
 
     protected function peaksReady(): Attribute
