@@ -307,7 +307,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                 <div class="section-head">
                     <h3>Tracks</h3>
                     <template v-if="canEdit">
-                        <Button icon="pi pi-upload" label="Upload track" size="small" @click="pickTrack" />
+                        <!-- Hidden file picker; the visible "Upload a track" button lives below. -->
                         <input ref="trackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onTrackSelected" />
                         <Button v-if="assignableTracks.length" icon="pi pi-plus" label="Add existing" size="small" text @click="showAddTracks = true" />
                     </template>
@@ -329,6 +329,9 @@ const openLightbox = (item) => { lightbox.value = item; };
                 </div>
                 <Card v-else>
                     <template #content>
+                        <div v-if="canEdit" class="card-actions">
+                            <Button icon="pi pi-upload" label="Upload a track" size="small" outlined @click="pickTrack" />
+                        </div>
                         <div class="track-list">
                             <div v-for="(track, i) in tracks" :key="track.id" class="track-row">
                                 <div class="track-head">
@@ -350,10 +353,8 @@ const openLightbox = (item) => { lightbox.value = item; };
             <section>
                 <div class="section-head">
                     <h3>Photos &amp; videos <span v-if="media.length" class="count-badge">{{ media.length }}</span></h3>
-                    <template v-if="canEdit">
-                        <Button icon="pi pi-upload" label="Upload media" size="small" @click="pickMedia" />
-                        <input ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
-                    </template>
+                    <!-- Hidden file picker; the visible "Upload media" button lives below. -->
+                    <input v-if="canEdit" ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
                 </div>
 
                 <Card v-if="canEdit && uploads.length" class="uploads">
@@ -371,8 +372,12 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <Button v-if="canEdit" label="Upload media" icon="pi pi-upload" size="small" @click="pickMedia" />
                 </div>
 
-                <div v-else class="media-grid">
-                    <div v-for="item in media" :key="item.id" class="media-tile">
+                <div v-else>
+                    <div v-if="canEdit" class="card-actions">
+                        <Button icon="pi pi-upload" label="Upload media" size="small" outlined @click="pickMedia" />
+                    </div>
+                    <div class="media-grid">
+                        <div v-for="item in media" :key="item.id" class="media-tile">
                         <button class="thumb-btn" @click="openLightbox(item)" :aria-label="`Open ${item.name}`">
                             <img v-if="item.thumb_url || (item.kind === 'image' && item.url)" :src="item.thumb_url || item.url" :alt="item.name" loading="lazy" />
                             <div v-else class="placeholder"><i :class="item.kind === 'video' ? 'pi pi-video' : 'pi pi-image'" /></div>
@@ -383,6 +388,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                             <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
                         </div>
                         <div v-if="item.contributor_name" class="tile-by" :title="item.contributor_name">{{ item.contributor_name }}</div>
+                    </div>
                     </div>
                 </div>
             </section>
@@ -510,6 +516,7 @@ const openLightbox = (item) => { lightbox.value = item; };
 .empty i { font-size: 1.75rem; }
 .empty p { margin: 0; }
 .uploads { margin-bottom: 1rem; }
+.card-actions { display: flex; justify-content: flex-end; margin-bottom: 0.75rem; }
 .upload-row { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.75rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.75rem; }
