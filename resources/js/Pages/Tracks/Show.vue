@@ -124,10 +124,22 @@ const setupMixer = (audioEl, channels, corsOk) => {
             panners.push(panner);
         }
 
-        levels.value = Array(channels).fill(100);
-        pans.value = Array(channels).fill(0);
-        muted.value = Array(channels).fill(false);
+        // Seed from a saved default mix when present (the owner's saved
+        // levels/pans/mutes are persisted on the track and apply to shared
+        // viewers too). Anything past the saved length falls back to the
+        // unity defaults so a re-encoded source with extra channels still loads.
+        const saved = props.track.default_mix ?? null;
+        levels.value = Array.from({ length: channels }, (_, i) => saved?.[i]?.level ?? 100);
+        pans.value = Array.from({ length: channels }, (_, i) => saved?.[i]?.pan ?? 0);
+        muted.value = Array.from({ length: channels }, (_, i) => !!saved?.[i]?.muted);
         labels.value = Array.from({ length: channels }, (_, i) => props.track.channel_labels?.[i] ?? '');
+
+        // Push the seeded state into the audio graph directly (instantaneous,
+        // pre-playback) so the first playback already reflects the saved mix.
+        for (let i = 0; i < channels; i++) {
+            gainNodes[i].gain.value = muted.value[i] ? 0 : levels.value[i] / 100;
+            panners[i].pan.value = pans.value[i] / 100;
+        }
     } catch (e) {
         // A tainted (cross-origin) media source throws here; fall back to plain
         // playback without per-channel control.
@@ -207,6 +219,50 @@ const saveLabels = async () => {
         savedTimer = setTimeout(() => { labelsStatus.value = ''; }, 1500);
     } catch (e) {
         labelsStatus.value = '';
+    }
+};
+
+// Default mix: owner-only Save/Clear that persists the current per-channel
+// state. Loaded automatically by setupMixer on every visit (owner or shared).
+const mixStatus = ref(''); // '' | 'saving' | 'saved'
+let mixStatusTimer = null;
+const hasDefaultMix = ref(!!props.track.default_mix);
+
+const saveDefaultMix = async () => {
+    mixStatus.value = 'saving';
+    try {
+        const payload = levels.value.map((lvl, i) => ({
+            level: lvl,
+            pan: pans.value[i] ?? 0,
+            muted: !!muted.value[i],
+        }));
+        const res = await apiFetch(route('tracks.update', props.track.id), {
+            method: 'PATCH',
+            body: { default_mix: payload },
+        });
+        if (!res.ok) throw new Error('save failed');
+        hasDefaultMix.value = true;
+        mixStatus.value = 'saved';
+        clearTimeout(mixStatusTimer);
+        mixStatusTimer = setTimeout(() => { mixStatus.value = ''; }, 1500);
+    } catch (e) {
+        mixStatus.value = '';
+    }
+};
+
+const clearDefaultMix = async () => {
+    try {
+        const res = await apiFetch(route('tracks.update', props.track.id), {
+            method: 'PATCH',
+            body: { default_mix: null },
+        });
+        if (!res.ok) throw new Error('clear failed');
+        hasDefaultMix.value = false;
+        mixStatus.value = 'saved';
+        clearTimeout(mixStatusTimer);
+        mixStatusTimer = setTimeout(() => { mixStatus.value = ''; }, 1500);
+    } catch (e) {
+        // ignore
     }
 };
 
@@ -625,6 +681,7 @@ onBeforeUnmount(() => {
     clearInterval(pollTimer);
     clearInterval(detectPoll);
     clearTimeout(savedTimer);
+    clearTimeout(mixStatusTimer);
     clearTimeout(saveProposalTimer);
     regionDragUnsub?.();
     regionDragUnsub = null;
@@ -733,9 +790,9 @@ onBeforeUnmount(() => {
                     <div class="mixer-header">
                         <span class="mixer-title">Channel mixer</span>
                         <div v-if="canEdit" class="mixer-actions">
-                            <span class="mixer-status" :class="{ visible: labelsStatus }">
-                                <template v-if="labelsStatus === 'saving'">Saving…</template>
-                                <template v-else-if="labelsStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
+                            <span class="mixer-status" :class="{ visible: labelsStatus || mixStatus }">
+                                <template v-if="labelsStatus === 'saving' || mixStatus === 'saving'">Saving…</template>
+                                <template v-else-if="labelsStatus === 'saved' || mixStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
                             </span>
                             <Select
                                 v-if="templateList.length"
@@ -758,6 +815,22 @@ onBeforeUnmount(() => {
                                 </template>
                             </Select>
                             <Button label="Save as template" icon="pi pi-bookmark" size="small" outlined @click="openSaveTemplate" />
+                            <Button
+                                :label="hasDefaultMix ? 'Update default mix' : 'Save default mix'"
+                                icon="pi pi-sliders-h"
+                                size="small"
+                                outlined
+                                @click="saveDefaultMix"
+                            />
+                            <Button
+                                v-if="hasDefaultMix"
+                                label="Clear default"
+                                icon="pi pi-times"
+                                size="small"
+                                text
+                                severity="secondary"
+                                @click="clearDefaultMix"
+                            />
                         </div>
                     </div>
                 </template>

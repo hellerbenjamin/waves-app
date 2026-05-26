@@ -128,11 +128,27 @@ class TrackController extends Controller
                 ->all();
         }
 
+        if (array_key_exists('default_mix', $data)) {
+            // null clears the saved mix; otherwise trim to the channel count
+            // and coerce types so the client always reads back the same shape
+            // it writes (and shared viewers get something safe to apply).
+            $channels = count($track->peaks['channels'] ?? []);
+            $changes['default_mix'] = $data['default_mix'] === null ? null : collect($data['default_mix'])
+                ->take($channels)
+                ->map(fn ($entry) => [
+                    'level' => (int) round(max(0, min(100, (float) $entry['level']))),
+                    'pan' => (int) round(max(-100, min(100, (float) $entry['pan']))),
+                    'muted' => (bool) $entry['muted'],
+                ])
+                ->all();
+        }
+
         $track->update($changes);
 
         return response()->json([
             'name' => $track->original_name,
             'channel_labels' => $track->channel_labels,
+            'default_mix' => $track->default_mix,
         ]);
     }
 
@@ -168,6 +184,9 @@ class TrackController extends Controller
             'duration_seconds' => $track->duration_seconds,
             'peaks' => $track->peaks,
             'channel_labels' => $track->channel_labels,
+            // Saved mixer state both views initialise to. Shared viewers see it
+            // applied but can't save changes back (the update route is auth'd).
+            'default_mix' => $track->default_mix,
             'peaks_ready' => $track->peaks !== null,
             'split_proposal' => $shared ? null : $track->split_proposal,
             'children' => $shared ? [] : $track->children()

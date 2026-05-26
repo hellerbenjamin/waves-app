@@ -24,6 +24,7 @@ class Track extends Model
         'content_hash',
         'peaks',
         'channel_labels',
+        'default_mix',
         'duration_seconds',
         'share_token',
         'split_proposal',
@@ -32,6 +33,7 @@ class Track extends Model
     protected $casts = [
         'peaks' => 'array',
         'channel_labels' => 'array',
+        'default_mix' => 'array',
         'split_proposal' => 'array',
         'size' => 'integer',
         'duration_seconds' => 'float',

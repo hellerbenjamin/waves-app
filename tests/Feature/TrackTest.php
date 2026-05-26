@@ -99,7 +99,7 @@ class TrackTest extends TestCase
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['  Kick  ', '']])
             ->assertOk()
-            ->assertExactJson(['channel_labels' => ['Kick', null], 'name' => $track->original_name]);
+            ->assertExactJson(['channel_labels' => ['Kick', null], 'name' => $track->original_name, 'default_mix' => null]);
 
         $this->assertSame(['Kick', null], $track->fresh()->channel_labels);
     }
@@ -117,7 +117,7 @@ class TrackTest extends TestCase
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['original_name' => '  My Mix  '])
             ->assertOk()
-            ->assertExactJson(['channel_labels' => ['Kick', 'Snare'], 'name' => 'My Mix']);
+            ->assertExactJson(['channel_labels' => ['Kick', 'Snare'], 'name' => 'My Mix', 'default_mix' => null]);
 
         $fresh = $track->fresh();
         $this->assertSame('My Mix', $fresh->original_name);
