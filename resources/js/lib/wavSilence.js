@@ -1,46 +1,43 @@
 /**
- * Stream PCM from a WAV File, computing RMS per short window so we can both
- * (a) find silence ranges for song-boundary detection and (b) emit a
- * downsampled max/min envelope to drive a review waveform — in a single pass
- * over the bytes. Reads through `File.slice()` chunks, so multi-GB files stay
- * out of memory.
- */
-
-/**
- * @typedef {object} ScanOptions
- * @property {number} [silenceDb=-40]   RMS below this counts as silence (dBFS).
- * @property {number} [minSilence=1.5]  Drop silence runs shorter than this (s).
- * @property {number} [windowMs=20]     RMS window length (ms).
- * @property {number} [peakStrides=2000] Max pairs in the envelope; bigger = smoother.
- * @property {(progress:number) => void} [onProgress] 0..1 progress reporter.
+ * Stream PCM from a WAV File once, producing both a per-window RMS envelope
+ * (for silence detection) and a downsampled max/min envelope (for the review
+ * waveform). Detection then runs from the cached RMS in-memory, so dragging
+ * the threshold/min-silence sliders re-detects in milliseconds instead of
+ * re-reading the file.
  *
- * @typedef {object} ScanResult
- * @property {{start:number,end:number}[]} silences  Silence ranges in seconds.
- * @property {number[]} peaks  Interleaved [max,min, max,min, …] envelope, [-1,1].
+ * Reads through `File.slice()` chunks, so multi-GB files stay out of memory.
+ * The expensive scan is structured to run inside a Web Worker (see
+ * wavSilenceWorker.js); detect/invert are tiny and run on the main thread.
  */
 
 /**
+ * @typedef {object} WindowsResult
+ * @property {Float32Array} rmsPerWindow    RMS magnitude in [0,1] per window.
+ * @property {number[]}     peaks           Interleaved [max,min, max,min, …] envelope, [-1,1].
+ * @property {number}       framesPerWindow How many PCM frames each window covers.
+ * @property {number}       windowMs        Window length in ms (round-trip for callers).
+ */
+
+/**
+ * One pass over the PCM: emit per-window RMS and a downsampled peaks envelope.
+ *
  * @param {File|Blob} file
  * @param {import('./wav.js').WavHeader} header
- * @param {ScanOptions} [opts]
- * @returns {Promise<ScanResult>}
+ * @param {{ windowMs?: number, peakStrides?: number, onProgress?: (p:number)=>void }} [opts]
+ * @returns {Promise<WindowsResult>}
  */
-export async function scanSilences(file, header, opts = {}) {
-    const {
-        silenceDb = -40,
-        minSilence = 1.5,
-        windowMs = 20,
-        peakStrides = 2000,
-        onProgress,
-    } = opts;
-
+export async function scanWindows(file, header, opts = {}) {
+    const { windowMs = 20, peakStrides = 2000, onProgress } = opts;
     const { sampleRate, channels, bitsPerSample, bytesPerFrame, dataOffset, dataLength } = header;
+
     const framesPerWindow = Math.max(1, Math.round(sampleRate * (windowMs / 1000)));
     const bytesPerWindow = framesPerWindow * bytesPerFrame;
     const totalWindows = Math.max(1, Math.floor(dataLength / bytesPerWindow));
 
-    // Linear amplitude threshold (RMS is also in 0..1, so compare apples-to-apples).
-    const threshold = Math.pow(10, silenceDb / 20);
+    // Hold one RMS value per window. Float32 is plenty of precision for a
+    // 0..1 magnitude and halves the memory vs Float64 — at 20 ms/window over
+    // a 4-hour file that's ~5 MB instead of 10.
+    const rmsPerWindow = new Float32Array(totalWindows);
 
     // The envelope strides every N windows; N is chosen so the file maps to
     // roughly `peakStrides` total pairs (capped to the input length).
@@ -50,27 +47,26 @@ export async function scanSilences(file, header, opts = {}) {
     let peakAccMin = Infinity;
     let peakCounter = 0;
 
-    const silences = [];
-    let silenceStartWindow = null;
-
     // 4 MB chunks: a balance between Range-header overhead and per-read latency.
     const CHUNK_BYTES = 1 << 22;
     const dataEnd = dataOffset + dataLength;
     let cursor = dataOffset;
     let windowIndex = 0;
 
-    // Per-sample decoder picked once per scan to keep the inner loop tight.
     const decodeSample = sampleDecoder(bitsPerSample);
 
-    while (cursor < dataEnd) {
+    while (cursor < dataEnd && windowIndex < totalWindows) {
         const end = Math.min(cursor + CHUNK_BYTES, dataEnd);
         const chunk = await file.slice(cursor, end).arrayBuffer();
         const view = new DataView(chunk);
 
         // Process only as many whole windows as fit; bytes past the last whole
-        // window are re-read at the start of the next chunk by advancing the
-        // file cursor exactly the number of bytes we consumed.
-        const wholeWindows = Math.floor(view.byteLength / bytesPerWindow);
+        // window get re-read by advancing the file cursor exactly the number of
+        // bytes we consumed.
+        const wholeWindows = Math.min(
+            Math.floor(view.byteLength / bytesPerWindow),
+            totalWindows - windowIndex,
+        );
 
         for (let w = 0; w < wholeWindows; w++) {
             const base = w * bytesPerWindow;
@@ -91,19 +87,7 @@ export async function scanSilences(file, header, opts = {}) {
                 }
             }
 
-            const rms = Math.sqrt(sumSq / count);
-
-            // Silence run-length encoding: open a run on the first quiet
-            // window, close it the next loud one, and only keep runs long
-            // enough that the user actually meant them as gaps.
-            const isSilent = rms < threshold;
-            if (isSilent && silenceStartWindow === null) silenceStartWindow = windowIndex;
-            if (!isSilent && silenceStartWindow !== null) {
-                const startSec = (silenceStartWindow * framesPerWindow) / sampleRate;
-                const endSec = (windowIndex * framesPerWindow) / sampleRate;
-                if (endSec - startSec >= minSilence) silences.push({ start: startSec, end: endSec });
-                silenceStartWindow = null;
-            }
+            rmsPerWindow[windowIndex] = Math.sqrt(sumSq / count);
 
             // Downsample into the envelope: accumulate window max/min across
             // N windows, then flush one [max,min] pair when the stride fills.
@@ -129,14 +113,47 @@ export async function scanSilences(file, header, opts = {}) {
         peaks.push(Number(peakAccMax.toFixed(4)), Number(peakAccMin.toFixed(4)));
     }
 
-    // Close a silence run that extends to EOF.
+    return { rmsPerWindow, peaks, framesPerWindow, windowMs };
+}
+
+/**
+ * Pure, in-memory pass over a cached RMS envelope. Cheap enough to re-run on
+ * every slider tick so the user gets a live preview.
+ *
+ * @param {Float32Array} rmsPerWindow
+ * @param {{ framesPerWindow: number, sampleRate: number }} timing
+ * @param {{ silenceDb?: number, minSilence?: number }} [opts]
+ * @returns {{start:number,end:number}[]}
+ */
+export function detectSilences(rmsPerWindow, timing, opts = {}) {
+    const { framesPerWindow, sampleRate } = timing;
+    const { silenceDb = -40, minSilence = 1.5 } = opts;
+
+    // Linear amplitude threshold to compare directly against RMS magnitude.
+    const threshold = Math.pow(10, silenceDb / 20);
+    const secondsPerWindow = framesPerWindow / sampleRate;
+
+    const silences = [];
+    let silenceStartWindow = null;
+
+    for (let w = 0; w < rmsPerWindow.length; w++) {
+        const isSilent = rmsPerWindow[w] < threshold;
+        if (isSilent && silenceStartWindow === null) silenceStartWindow = w;
+        if (!isSilent && silenceStartWindow !== null) {
+            const startSec = silenceStartWindow * secondsPerWindow;
+            const endSec = w * secondsPerWindow;
+            if (endSec - startSec >= minSilence) silences.push({ start: startSec, end: endSec });
+            silenceStartWindow = null;
+        }
+    }
+
     if (silenceStartWindow !== null) {
-        const startSec = (silenceStartWindow * framesPerWindow) / sampleRate;
-        const endSec = (windowIndex * framesPerWindow) / sampleRate;
+        const startSec = silenceStartWindow * secondsPerWindow;
+        const endSec = rmsPerWindow.length * secondsPerWindow;
         if (endSec - startSec >= minSilence) silences.push({ start: startSec, end: endSec });
     }
 
-    return { silences, peaks };
+    return silences;
 }
 
 /**

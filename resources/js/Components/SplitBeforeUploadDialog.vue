@@ -9,7 +9,7 @@ import Message from 'primevue/message';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { readWavHeader, buildSegmentBlob } from '@/lib/wav.js';
-import { scanSilences, invertToRegions } from '@/lib/wavSilence.js';
+import { detectSilences, invertToRegions } from '@/lib/wavSilence.js';
 
 /**
  * Split a long WAV File into per-region Blobs entirely in the browser, then
@@ -53,7 +53,12 @@ let ws = null;
 let regionsPlugin = null;
 let regionDragUnsub = null;
 let suppressRegionEvents = false;
-let scanToken = 0; // cancellation token for in-flight scans
+
+// Heavy scan runs once in a Web Worker; the result is cached so re-detection
+// on every slider tick is a fast in-memory pass on the main thread.
+let scanWorker = null;
+let rmsCache = null; // Float32Array of per-window RMS magnitudes
+let framesPerWindowCache = 0;
 
 const formatTime = (s) => {
     if (!isFinite(s)) return '0:00';
@@ -74,8 +79,10 @@ const regionColor = (i) => [
     'rgba(245, 158, 11, 0.20)',
 ][i % 4];
 
-// Open: parse the header, then kick off the first scan. The header gives us
-// an authoritative duration we render against while the scan is still running.
+// Open: parse the header, then kick off the heavy scan in a Web Worker.
+// The header gives us an authoritative duration we render against while the
+// scan is still running; the worker keeps the main thread responsive so the
+// progress bar, sliders, and ESC-to-cancel all stay live on multi-GB files.
 watch(() => props.visible, async (open) => {
     if (!open) {
         teardown();
@@ -96,49 +103,77 @@ watch(() => props.visible, async (open) => {
         return;
     }
 
-    await runScan();
+    runScanInWorker();
 }, { immediate: false });
 
-const runScan = async () => {
-    if (!header.value || !props.file) return;
-    const myToken = ++scanToken;
+const runScanInWorker = () => {
+    // Tear down any prior worker so a re-open never reuses a stale one.
+    scanWorker?.terminate();
+    scanWorker = new Worker(new URL('@/lib/wavSilenceWorker.js', import.meta.url), { type: 'module' });
 
-    phase.value = 'scanning';
-    scanProgress.value = 0;
+    scanWorker.onmessage = (event) => {
+        const msg = event.data;
+        if (msg.type === 'progress') {
+            scanProgress.value = msg.progress;
+        } else if (msg.type === 'done') {
+            rmsCache = new Float32Array(msg.rmsBuffer);
+            framesPerWindowCache = msg.framesPerWindow;
+            peaks.value = msg.peaks;
+            scanWorker?.terminate();
+            scanWorker = null;
+            applyDetection();
+            phase.value = 'ready';
+            nextTick(renderWaveform);
+        } else if (msg.type === 'error') {
+            phase.value = 'error';
+            errorMessage.value = msg.message;
+            scanWorker?.terminate();
+            scanWorker = null;
+        }
+    };
 
-    try {
-        const result = await scanSilences(props.file, header.value, {
-            silenceDb: silenceDb.value,
-            minSilence: minSilence.value,
-            windowMs: 20,
-            peakStrides: 2000,
-            onProgress: (p) => {
-                if (myToken === scanToken) scanProgress.value = p;
-            },
-        });
-
-        // A later re-scan superseded us while we were running; drop the result.
-        if (myToken !== scanToken) return;
-
-        peaks.value = result.peaks;
-        const detected = invertToRegions(result.silences, header.value.durationSeconds, minRegion.value);
-
-        // Suggested names mirror the server-side detect path.
-        regions.value = detected.map((r, i) => ({
-            id: 'r' + (i + 1),
-            start: Number(r.start.toFixed(3)),
-            end: Number(r.end.toFixed(3)),
-            name: `${baseName.value} - Part ${i + 1}`,
-        }));
-
-        phase.value = 'ready';
-        await nextTick();
-        renderWaveform();
-    } catch (e) {
-        if (myToken !== scanToken) return;
+    scanWorker.onerror = (err) => {
         phase.value = 'error';
-        errorMessage.value = e?.message || String(e);
-    }
+        errorMessage.value = err?.message || 'Worker failed';
+        scanWorker?.terminate();
+        scanWorker = null;
+    };
+
+    scanWorker.postMessage({
+        file: props.file,
+        header: { ...header.value }, // strip reactivity for structured-clone
+        opts: { windowMs: 20, peakStrides: 2000 },
+    });
+};
+
+/**
+ * Recompute regions from the cached RMS envelope. Called once after the scan
+ * completes and again on every slider tick — runs in milliseconds because it
+ * just walks the in-memory Float32Array.
+ *
+ * Preserves any region renames the user already made: when the count and
+ * order line up, names carry over; otherwise we fall back to defaults so a
+ * drastic threshold change doesn't strand stale names.
+ */
+const applyDetection = () => {
+    if (!rmsCache || !header.value) return;
+
+    const silences = detectSilences(
+        rmsCache,
+        { framesPerWindow: framesPerWindowCache, sampleRate: header.value.sampleRate },
+        { silenceDb: silenceDb.value, minSilence: minSilence.value },
+    );
+    const detected = invertToRegions(silences, header.value.durationSeconds, minRegion.value);
+
+    const prior = regions.value;
+    regions.value = detected.map((r, i) => ({
+        id: 'r' + (i + 1),
+        start: Number(r.start.toFixed(3)),
+        end: Number(r.end.toFixed(3)),
+        name: prior[i]?.name || `${baseName.value} - Part ${i + 1}`,
+    }));
+
+    syncRegionsToWaveform();
 };
 
 const renderWaveform = () => {
@@ -230,7 +265,10 @@ const renameRegion = (id, name) => {
 };
 
 const teardown = () => {
-    scanToken++; // invalidate any in-flight scan
+    scanWorker?.terminate();
+    scanWorker = null;
+    rmsCache = null;
+    framesPerWindowCache = 0;
     regionDragUnsub?.();
     regionDragUnsub = null;
     ws?.destroy();
@@ -312,7 +350,7 @@ const dialogVisible = computed({
             </Message>
 
             <div v-if="phase === 'scanning'" class="scan-progress">
-                <p>Analysing audio…</p>
+                <p>Analysing audio in the background — your browser stays responsive.</p>
                 <ProgressBar :value="Math.round(scanProgress * 100)" />
             </div>
 
@@ -322,15 +360,15 @@ const dialogVisible = computed({
                 <div class="split-params">
                     <div class="split-param">
                         <label>Silence threshold <span class="split-param-val">{{ silenceDb }} dB</span></label>
-                        <Slider v-model="silenceDb" :min="-80" :max="-10" :step="1" @change="runScan" />
+                        <Slider v-model="silenceDb" :min="-80" :max="-10" :step="1" @update:model-value="applyDetection" />
                     </div>
                     <div class="split-param">
                         <label>Min silence length <span class="split-param-val">{{ minSilence }} s</span></label>
-                        <Slider v-model="minSilence" :min="0.2" :max="10" :step="0.1" @change="runScan" />
+                        <Slider v-model="minSilence" :min="0.2" :max="10" :step="0.1" @update:model-value="applyDetection" />
                     </div>
                     <div class="split-param">
                         <label>Min song length <span class="split-param-val">{{ minRegion }} s</span></label>
-                        <Slider v-model="minRegion" :min="1" :max="600" :step="1" @change="runScan" />
+                        <Slider v-model="minRegion" :min="1" :max="600" :step="1" @update:model-value="applyDetection" />
                     </div>
                 </div>
 
