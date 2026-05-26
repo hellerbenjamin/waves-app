@@ -18,9 +18,9 @@ class ExtractPeaks implements ShouldQueue
      * capped so a long track stays a reasonable JSON payload while a short one
      * still gets enough detail to draw a useful waveform.
      */
-    private const PAIRS_PER_SECOND = 20;
+    private const int SECOND_PER_SECOND = 20;
 
-    private const MAX_PAIRS = 8000;
+    private const int MAX_PAIRS = 8000;
 
     public int $timeout = 1800;
 
@@ -36,7 +36,7 @@ class ExtractPeaks implements ShouldQueue
         $sampleRate = max(1, (int) ($probe['sample_rate'] ?? 44100));
         $duration = (float) ($probe['duration'] ?? 0.0);
 
-        $pairs = (int) max(1, min(self::MAX_PAIRS, round($duration * self::PAIRS_PER_SECOND)));
+        $pairs = (int) max(1, min(self::MAX_PAIRS, round($duration * self::SECOND_PER_SECOND)));
         $totalFrames = max(1, (int) round($duration * $sampleRate));
         $framesPerPair = max(1, (int) ceil($totalFrames / $pairs));
 

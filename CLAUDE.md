@@ -66,5 +66,9 @@ This project runs under **ddev** (PHP 8.4, Node 24, MariaDB 11.8). Run tooling
 
 ## Git
 
+- **Never commit (or push) unless I explicitly ask you to in that message.**
+  Finishing or verifying work is not a request to commit — leave the changes
+  staged-or-unstaged and wait. "Execute/implement/fix X" means write the code,
+  not commit it.
 - Committing directly to `master` is fine in this repo — no feature branch
-  required. Still only commit/push when asked.
+  required.
