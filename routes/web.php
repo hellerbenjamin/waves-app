@@ -5,6 +5,7 @@ use App\Http\Controllers\ContributionController;
 use App\Http\Controllers\EventController;
 use App\Http\Controllers\MediaController;
 use App\Http\Controllers\ProfileController;
+use App\Http\Controllers\PublicProfileController;
 use App\Http\Controllers\TrackController;
 use Illuminate\Foundation\Application;
 use Illuminate\Support\Facades\Route;
@@ -20,6 +21,14 @@ Route::get('/events/share/{event:share_token}', [EventController::class, 'showSh
 Route::get('/events/share/{event:share_token}/tracks/{track}/stream', [EventController::class, 'streamSharedTrack'])->name('events.shared.track-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
+
+// A shared profile reaches all of a user's events (and their tracks/media)
+// through the single profile token, so events don't each need their own link.
+Route::get('/u/{user:share_token}', [PublicProfileController::class, 'show'])->name('profile.shared');
+Route::get('/u/{user:share_token}/events/{event}', [PublicProfileController::class, 'showEvent'])->name('profile.shared.event');
+Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/stream', [PublicProfileController::class, 'streamTrack'])->name('profile.shared.track-stream');
+Route::get('/u/{user:share_token}/events/{event}/media/{media}/stream', [PublicProfileController::class, 'streamMedia'])->name('profile.shared.media-stream');
+Route::get('/u/{user:share_token}/events/{event}/media/{media}/thumb', [PublicProfileController::class, 'thumbMedia'])->name('profile.shared.media-thumb');
 
 // Per-item media share links.
 Route::get('/media/share/{media:share_token}', [MediaController::class, 'showShared'])->name('media.shared');
@@ -51,6 +60,8 @@ Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+    Route::post('/profile/share', [ProfileController::class, 'share'])->name('profile.share');
+    Route::delete('/profile/share', [ProfileController::class, 'unshare'])->name('profile.unshare');
 });
 
 Route::middleware('auth')->group(function () {

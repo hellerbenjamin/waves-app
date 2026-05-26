@@ -11,6 +11,8 @@ use App\Models\Media;
 use App\Models\Track;
 use App\Services\MediaStorage;
 use App\Services\TrackStorage;
+use App\Support\EventLinkContext;
+use App\Support\EventPresenter;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -27,6 +29,7 @@ class EventController extends Controller
     public function __construct(
         private TrackStorage $tracks,
         private MediaStorage $media,
+        private EventPresenter $presenter,
     ) {}
 
     public function index(Request $request): Response
@@ -80,7 +83,7 @@ class EventController extends Controller
                 ->latest()
                 ->get(['id', 'original_name'])
                 ->map(fn (Track $t) => ['id' => $t->id, 'name' => $t->original_name]),
-            'event' => $this->eventProps($event, shared: false),
+            'event' => $this->presenter->event($event, EventLinkContext::owner($event)),
         ]);
     }
 
@@ -92,7 +95,7 @@ class EventController extends Controller
             'canEdit' => false,
             'types' => Event::TYPES,
             'assignableTracks' => [],
-            'event' => $this->eventProps($event, shared: true),
+            'event' => $this->presenter->event($event, EventLinkContext::eventShare($event)),
         ]);
     }
 
@@ -209,84 +212,5 @@ class EventController extends Controller
         abort_unless($media->event_id === $event->id && $media->thumb_key, 404);
 
         return $this->media->streamResponse($media->thumb_key, 'image/jpeg');
-    }
-
-    /**
-     * Shape an event (and its tracks/media) for the page. `shared` switches the
-     * baked-in stream URLs between the authenticated app routes and the public
-     * token-scoped ones.
-     *
-     * @return array<string, mixed>
-     */
-    private function eventProps(Event $event, bool $shared): array
-    {
-        return [
-            'id' => $event->id,
-            'name' => $event->name,
-            'type' => $event->type,
-            'event_date' => $event->event_date?->toDateString(),
-            'location' => $event->location,
-            'description' => $event->description,
-            'share_url' => $event->share_token ? route('events.shared', $event->share_token) : null,
-            'tracks' => $event->tracks->map(fn (Track $t) => $this->trackCard($t, $event, $shared))->all(),
-            'media' => $event->media->map(fn (Media $m) => $this->mediaCard($m, $event, $shared))->all(),
-            // Contribution links are an owner-only concern; never on the public view.
-            'invites' => $shared ? [] : $event->invites->map(fn (EventInvite $i) => [
-                'id' => $i->id,
-                'label' => $i->label,
-                'url' => route('contribute.show', $i->token),
-                'expires_at' => $i->expires_at?->toIso8601String(),
-                'uploads_count' => $i->uploads_count,
-                'active' => $i->isUsable(),
-            ])->all(),
-        ];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function trackCard(Track $track, Event $event, bool $shared): array
-    {
-        $route = $shared
-            ? route('events.shared.track-stream', [$event->share_token, $track->id])
-            : route('tracks.stream', $track->id);
-
-        return [
-            'id' => $track->id,
-            'name' => $track->original_name,
-            'duration_seconds' => $track->duration_seconds,
-            'peaks_ready' => $track->peaks !== null,
-            'stream_url' => $this->tracks->playbackUrl($track, $route, $shared),
-            'stream_cross_origin' => $this->tracks->streamCrossOrigin(),
-        ];
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function mediaCard(Media $media, Event $event, bool $shared): array
-    {
-        $streamRoute = $shared
-            ? route('events.shared.media-stream', [$event->share_token, $media->id])
-            : route('media.stream', $media->id);
-
-        $thumbRoute = $shared
-            ? route('events.shared.media-thumb', [$event->share_token, $media->id])
-            : route('media.thumb', $media->id);
-
-        return [
-            'id' => $media->id,
-            'name' => $media->original_name,
-            'kind' => $media->kind,
-            'mime' => $media->mime,
-            'size' => $media->size,
-            'width' => $media->width,
-            'height' => $media->height,
-            'url' => $this->media->objectUrl($media->s3_key, $streamRoute, $shared),
-            'thumb_url' => $this->media->objectUrl($media->thumb_key, $thumbRoute, $shared),
-            'share_url' => (! $shared && $media->share_token) ? route('media.shared', $media->share_token) : null,
-            'contributor_name' => $media->contributor_name,
-            'created_at' => $media->created_at?->toIso8601String(),
-        ];
     }
 }

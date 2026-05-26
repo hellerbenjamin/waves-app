@@ -1,6 +1,7 @@
 <script setup>
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import DeleteUserForm from './Partials/DeleteUserForm.vue';
+import ShareEventsForm from './Partials/ShareEventsForm.vue';
 import UpdatePasswordForm from './Partials/UpdatePasswordForm.vue';
 import UpdateProfileInformationForm from './Partials/UpdateProfileInformationForm.vue';
 import { Head } from '@inertiajs/vue3';
@@ -9,6 +10,7 @@ import Card from 'primevue/card';
 defineProps({
     mustVerifyEmail: Boolean,
     status: String,
+    shareUrl: { type: String, default: null },
 });
 </script>
 
@@ -24,6 +26,11 @@ defineProps({
             <Card>
                 <template #content>
                     <UpdateProfileInformationForm :must-verify-email="mustVerifyEmail" :status="status" />
+                </template>
+            </Card>
+            <Card>
+                <template #content>
+                    <ShareEventsForm :share-url="shareUrl" />
                 </template>
             </Card>
             <Card>
