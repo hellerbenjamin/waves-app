@@ -19,6 +19,8 @@ import ConfirmDialog from 'primevue/confirmdialog';
 import { useConfirm } from 'primevue/useconfirm';
 import { typeLabel, typeOptions } from '@/lib/eventTypes';
 import { useS3Upload, apiFetch } from '@/composables/useS3Upload';
+import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
+import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
 
 const props = defineProps({
     event: { type: Object, required: true },
@@ -192,11 +194,23 @@ const { uploads: trackUploads, addFiles: addTrackFiles } = useS3Upload({
     onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),
 });
 
+// Long WAVs get cut up in the browser before upload (see useSplitBeforeUpload).
+// The composable hands committed segments back to the same addTrackFiles path
+// so the storage/finalise plumbing is shared.
+const {
+    splitDialogVisible: trackSplitDialogVisible,
+    pendingSplitFile: pendingTrackSplitFile,
+    enqueueWithSplit: enqueueTrackWithSplit,
+    onSplitCommit: onTrackSplitCommit,
+    onSplitUploadWhole: onTrackSplitUploadWhole,
+    onSplitCancel: onTrackSplitCancel,
+} = useSplitBeforeUpload((file) => addTrackFiles([file]));
+
 const pickTrack = () => trackInput.value?.click();
 const onTrackSelected = (event) => {
     const files = Array.from(event.target.files || []);
     event.target.value = '';
-    addTrackFiles(files);
+    for (const file of files) enqueueTrackWithSplit(file);
 };
 
 const confirmDeleteMedia = (item) => confirm.require({
@@ -251,6 +265,14 @@ const openLightbox = (item) => { lightbox.value = item; };
     <Head :title="event.name" />
     <Toast v-if="canEdit" />
     <ConfirmDialog v-if="canEdit" />
+    <SplitBeforeUploadDialog
+        v-if="canEdit"
+        v-model:visible="trackSplitDialogVisible"
+        :file="pendingTrackSplitFile"
+        @commit="onTrackSplitCommit"
+        @upload-whole="onTrackSplitUploadWhole"
+        @cancel="onTrackSplitCancel"
+    />
 
     <component :is="Layout">
         <template #header>

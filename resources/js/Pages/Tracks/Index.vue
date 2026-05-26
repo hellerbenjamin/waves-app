@@ -18,6 +18,8 @@ import ConfirmDialog from 'primevue/confirmdialog';
 import { useConfirm } from 'primevue/useconfirm';
 import Uppy from '@uppy/core';
 import AwsS3 from '@uppy/aws-s3';
+import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
+import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
 
 defineProps({
     tracks: { type: Array, required: true },
@@ -212,6 +214,14 @@ const addUpload = (file) => {
         return;
     }
 
+    // Long-WAV interception lives in the composable: it reads the header and
+    // either opens the split dialog or falls through to `queueForUpload`.
+    enqueueWithSplit(file);
+};
+
+// Push a File (or Blob-wrapped-as-File) at Uppy. Bypasses the duration check,
+// so it's also the entry point for the split dialog's segment outputs.
+const queueForUpload = (file) => {
     const entry = ref({ name: file.name, progress: 0, status: 'queued' });
     uploads.value.push(entry.value);
 
@@ -223,6 +233,15 @@ const addUpload = (file) => {
         toast.add({ severity: 'error', summary: 'Upload failed', detail: `${file.name}: ${err?.message || 'could not queue'}`, life: 5000 });
     }
 };
+
+const {
+    splitDialogVisible,
+    pendingSplitFile,
+    enqueueWithSplit,
+    onSplitCommit,
+    onSplitUploadWhole,
+    onSplitCancel,
+} = useSplitBeforeUpload(queueForUpload);
 
 const confirmDelete = (track) => {
     confirm.require({
@@ -278,6 +297,13 @@ const submitRename = async () => {
     <Head title="Tracks" />
     <Toast />
     <ConfirmDialog />
+    <SplitBeforeUploadDialog
+        v-model:visible="splitDialogVisible"
+        :file="pendingSplitFile"
+        @commit="onSplitCommit"
+        @upload-whole="onSplitUploadWhole"
+        @cancel="onSplitCancel"
+    />
 
     <AuthenticatedLayout>
         <template #header>
