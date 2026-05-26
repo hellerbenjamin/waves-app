@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Concerns\SignsDirectUploads;
 use App\Http\Requests\MediaUploadUrlRequest;
 use App\Http\Requests\StoreMediaRequest;
 use App\Jobs\GenerateThumbnail;
@@ -19,6 +20,7 @@ use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
 class MediaController extends Controller
 {
     use AuthorizesRequests;
+    use SignsDirectUploads;
 
     public function __construct(private MediaStorage $storage) {}
 
@@ -31,96 +33,26 @@ class MediaController extends Controller
         );
     }
 
-    public function createMultipart(Request $request): JsonResponse
+    protected function uploadStorage(): MediaStorage
     {
-        $validated = $request->validate([
-            'filename' => ['required', 'string', 'max:255'],
-            'size' => ['required', 'integer', 'min:1', 'max:53687091200'], // 50 GB
-            'content_type' => ['required', 'string', \Illuminate\Validation\Rule::in(Media::ALLOWED_MIMES)],
-        ]);
-
-        $key = $this->storage->newMediaKey(
-            $request->user(),
-            Media::extensionForMime($validated['content_type']),
-        );
-
-        return response()->json([
-            'key' => $key,
-            'uploadId' => $this->storage->createMultipartUpload($key, $validated['content_type']),
-        ]);
+        return $this->storage;
     }
 
-    public function signPart(Request $request): JsonResponse
+    protected function newUploadKey(Request $request, string $contentType): string
     {
-        $key = (string) $request->query('key', '');
-        $this->assertOwnsKey($request, $key);
-
-        $uploadId = (string) $request->query('uploadId', '');
-        $partNumber = (int) $request->query('partNumber', 0);
-        abort_if($uploadId === '' || $partNumber < 1, 422);
-
-        return response()->json([
-            'url' => $this->storage->signPart($key, $uploadId, $partNumber),
-        ]);
-    }
-
-    public function completeMultipart(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'key' => ['required', 'string'],
-            'uploadId' => ['required', 'string'],
-            'parts' => ['required', 'array', 'min:1'],
-            'parts.*.PartNumber' => ['required', 'integer', 'min:1'],
-            'parts.*.ETag' => ['required', 'string'],
-        ]);
-        $this->assertOwnsKey($request, $validated['key']);
-
-        $this->storage->completeMultipartUpload(
-            $validated['key'],
-            $validated['uploadId'],
-            $validated['parts'],
-        );
-
-        return response()->json(['location' => $validated['key']]);
-    }
-
-    public function abortMultipart(Request $request): SymfonyResponse
-    {
-        $validated = $request->validate([
-            'key' => ['required', 'string'],
-            'uploadId' => ['required', 'string'],
-        ]);
-        $this->assertOwnsKey($request, $validated['key']);
-
-        $this->storage->abortMultipartUpload($validated['key'], $validated['uploadId']);
-
-        return response()->noContent();
+        return $this->storage->newMediaKey($request->user(), Media::extensionForMime($contentType));
     }
 
     /**
-     * Delete an uploaded object whose finalisation (store) failed. The bytes
-     * are already in the bucket but no Media row references them, so without
-     * this a failed finalise would orphan a (potentially multi-gigabyte)
-     * object forever. Authorised by the owner-encoding key, since no row exists.
+     * A media key encodes its owner; reject any that isn't this user's. The
+     * only authorisation the upload endpoints need, since no Media row exists yet.
      */
-    public function cleanup(Request $request): SymfonyResponse
+    protected function assertCanWriteKey(Request $request, string $key): void
     {
-        $validated = $request->validate(['key' => ['required', 'string']]);
-        $this->assertOwnsKey($request, $validated['key']);
-
-        $this->storage->delete($validated['key']);
-
-        return response()->noContent();
-    }
-
-    public function uploadPut(Request $request): \Illuminate\Http\Response
-    {
-        $key = (string) $request->query('key', '');
-        $this->assertOwnsKey($request, $key);
-
-        $this->storage->put($key, $request->getContent(asResource: true));
-
-        return response()->noContent();
+        abort_unless(
+            str_starts_with($key, 'media/users/'.$request->user()->id.'/'),
+            403,
+        );
     }
 
     public function store(StoreMediaRequest $request): RedirectResponse
@@ -212,18 +144,5 @@ class MediaController extends Controller
     public function streamShared(Media $media): SymfonyResponse
     {
         return $this->storage->streamResponse($media->s3_key, $media->mime);
-    }
-
-    /**
-     * A media key encodes its owner; reject any that isn't this user's. The
-     * only authorisation the upload endpoints need, since no Media row exists
-     * yet.
-     */
-    private function assertOwnsKey(Request $request, string $key): void
-    {
-        abort_unless(
-            str_starts_with($key, 'media/users/'.$request->user()->id.'/'),
-            403,
-        );
     }
 }

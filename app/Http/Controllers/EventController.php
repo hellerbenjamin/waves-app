@@ -2,9 +2,11 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\StoreEventInviteRequest;
 use App\Http\Requests\StoreEventRequest;
 use App\Http\Requests\UpdateEventRequest;
 use App\Models\Event;
+use App\Models\EventInvite;
 use App\Models\Media;
 use App\Models\Track;
 use App\Services\MediaStorage;
@@ -63,7 +65,11 @@ class EventController extends Controller
     {
         $this->authorize('view', $event);
 
-        $event->load(['tracks' => fn ($q) => $q->latest(), 'media' => fn ($q) => $q->latest()]);
+        $event->load([
+            'tracks' => fn ($q) => $q->latest(),
+            'media' => fn ($q) => $q->latest(),
+            'invites' => fn ($q) => $q->whereNull('revoked_at')->latest(),
+        ]);
 
         return Inertia::render('Events/Show', [
             'canEdit' => true,
@@ -156,6 +162,30 @@ class EventController extends Controller
         return back();
     }
 
+    /** Mint a contribution link for this event (owner only, via policy). */
+    public function storeInvite(StoreEventInviteRequest $request, Event $event): RedirectResponse
+    {
+        $event->invites()->create([
+            'created_by' => $request->user()->id,
+            'token' => Str::random(40),
+            'label' => $request->validated('label'),
+            'expires_at' => $request->validated('expires_at'),
+        ]);
+
+        return back();
+    }
+
+    /** Revoke a link: a soft kill-switch that 410s the URL but keeps its uploads. */
+    public function destroyInvite(Event $event, EventInvite $eventInvite): RedirectResponse
+    {
+        $this->authorize('delete', $eventInvite);
+        abort_unless($eventInvite->event_id === $event->id, 404);
+
+        $eventInvite->update(['revoked_at' => now()]);
+
+        return back();
+    }
+
     // --- Token-scoped public streaming -------------------------------------
     // A shared event grants access to its own tracks/media without each item
     // needing its own share link; ownership is the event token plus membership.
@@ -200,6 +230,15 @@ class EventController extends Controller
             'share_url' => $event->share_token ? route('events.shared', $event->share_token) : null,
             'tracks' => $event->tracks->map(fn (Track $t) => $this->trackCard($t, $event, $shared))->all(),
             'media' => $event->media->map(fn (Media $m) => $this->mediaCard($m, $event, $shared))->all(),
+            // Contribution links are an owner-only concern; never on the public view.
+            'invites' => $shared ? [] : $event->invites->map(fn (EventInvite $i) => [
+                'id' => $i->id,
+                'label' => $i->label,
+                'url' => route('contribute.show', $i->token),
+                'expires_at' => $i->expires_at?->toIso8601String(),
+                'uploads_count' => $i->uploads_count,
+                'active' => $i->isUsable(),
+            ])->all(),
         ];
     }
 
@@ -246,6 +285,7 @@ class EventController extends Controller
             'url' => $this->media->objectUrl($media->s3_key, $streamRoute, $shared),
             'thumb_url' => $this->media->objectUrl($media->thumb_key, $thumbRoute, $shared),
             'share_url' => (! $shared && $media->share_token) ? route('media.shared', $media->share_token) : null,
+            'contributor_name' => $media->contributor_name,
             'created_at' => $media->created_at?->toIso8601String(),
         ];
     }

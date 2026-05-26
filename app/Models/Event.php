@@ -42,4 +42,10 @@ class Event extends Model
     {
         return $this->hasMany(Media::class);
     }
+
+    /** Contribution links that let people upload into this event without an account. */
+    public function invites(): HasMany
+    {
+        return $this->hasMany(EventInvite::class);
+    }
 }

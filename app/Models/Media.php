@@ -32,6 +32,8 @@ class Media extends Model
     protected $fillable = [
         'user_id',
         'event_id',
+        'event_invite_id',
+        'contributor_name',
         's3_key',
         'original_name',
         'mime',
@@ -57,6 +59,12 @@ class Media extends Model
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class);
+    }
+
+    /** The contribution link this was uploaded through, if anonymous; null for owner uploads. */
+    public function invite(): BelongsTo
+    {
+        return $this->belongsTo(EventInvite::class, 'event_invite_id');
     }
 
     /** Classify an upload as 'image' or 'video' from its MIME type. */

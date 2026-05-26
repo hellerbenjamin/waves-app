@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\EventInvite;
 use App\Models\Media;
 use App\Models\User;
 use App\Services\Concerns\InteractsWithS3;
@@ -31,16 +32,44 @@ class MediaStorage
     {
         $key = $this->newMediaKey($user, $extension);
 
+        return $this->signedPut($key, $contentType, fn () => URL::temporarySignedRoute(
+            'media.upload-put',
+            now()->addMinutes(15),
+            ['key' => $key],
+        ));
+    }
+
+    /**
+     * Mint an upload target for an anonymous contribution. Identical to
+     * {@see uploadTarget} but keyed under the event (not a user), so the public
+     * upload endpoints can authorise from the invite token instead of auth().
+     * The local-disk fallback signs the token-scoped contribution put route.
+     *
+     * @return array{url: string, headers: array<string, string>, s3_key: string}
+     */
+    public function contribUploadTarget(EventInvite $invite, string $contentType, string $extension): array
+    {
+        $key = $this->newContribKey($invite->event_id, $extension);
+
+        return $this->signedPut($key, $contentType, fn () => URL::temporarySignedRoute(
+            'contribute.upload-put',
+            now()->addMinutes(15),
+            ['invite' => $invite->token, 'key' => $key],
+        ));
+    }
+
+    /**
+     * The single-PUT upload target for a key. On S3 it's a presigned PUT
+     * straight to the bucket; on other disks a signed app endpoint that streams
+     * to disk, whose URL the caller supplies (it knows which route guards it).
+     *
+     * @param  callable(): string  $localUrl
+     * @return array{url: string, headers: array<string, string>, s3_key: string}
+     */
+    private function signedPut(string $key, string $contentType, callable $localUrl): array
+    {
         if (! $this->isS3()) {
-            return [
-                'url' => URL::temporarySignedRoute(
-                    'media.upload-put',
-                    now()->addMinutes(15),
-                    ['key' => $key],
-                ),
-                'headers' => [],
-                's3_key' => $key,
-            ];
+            return ['url' => $localUrl(), 'headers' => [], 's3_key' => $key];
         }
 
         /** @var AwsS3V3Adapter $disk */
@@ -66,9 +95,22 @@ class MediaStorage
      */
     public function newMediaKey(User $user, string $extension): string
     {
-        $ext = strtolower(preg_replace('/[^a-z0-9]/i', '', $extension) ?: 'bin');
+        return "media/users/{$user->id}/".(string) Str::ulid().'.'.$this->normalizeExt($extension);
+    }
 
-        return "media/users/{$user->id}/".(string) Str::ulid().'.'.$ext;
+    /**
+     * An event-scoped contribution key. Authorisation comes from the invite
+     * token plus this prefix, so anonymous uploads never need a user id.
+     */
+    public function newContribKey(int $eventId, string $extension): string
+    {
+        return "media/events/{$eventId}/contrib/".(string) Str::ulid().'.'.$this->normalizeExt($extension);
+    }
+
+    /** Normalise an extension to a short lowercase token. */
+    private function normalizeExt(string $extension): string
+    {
+        return strtolower(preg_replace('/[^a-z0-9]/i', '', $extension) ?: 'bin');
     }
 
     /** The thumbnail key that sits beside a media object (always a JPEG). */

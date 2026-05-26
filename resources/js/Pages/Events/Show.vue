@@ -175,6 +175,33 @@ const shareMedia = async (item) => {
     toast.add({ severity: 'success', summary: 'Link copied', detail: url, life: 3000 });
 };
 
+// --- Collecting uploads (anonymous contribution links) -----------------------
+const invites = computed(() => props.event.invites ?? []);
+const inviteForm = useForm({ label: '', expires_at: null });
+
+const submitInvite = () => {
+    inviteForm
+        // Expire at the end of the chosen day so "today" isn't already past.
+        .transform((data) => ({ ...data, expires_at: data.expires_at ? `${toDateString(data.expires_at)} 23:59:59` : null }))
+        .post(route('events.invites.store', props.event.id), {
+            preserveScroll: true,
+            onSuccess: () => inviteForm.reset(),
+        });
+};
+
+const copyInvite = (invite) => {
+    navigator.clipboard?.writeText(invite.url);
+    toast.add({ severity: 'success', summary: 'Upload link copied', detail: invite.url, life: 3000 });
+};
+
+const revokeInvite = (invite) => confirm.require({
+    message: `Revoke this upload link${invite.label ? ` ("${invite.label}")` : ''}? Anyone holding it can no longer upload. Photos and videos already collected stay.`,
+    header: 'Revoke upload link',
+    icon: 'pi pi-exclamation-triangle',
+    acceptClass: 'p-button-danger',
+    accept: () => router.delete(route('events.invites.destroy', [props.event.id, invite.id]), { preserveScroll: true }),
+});
+
 // --- Image lightbox ----------------------------------------------------------
 const lightbox = ref(null);
 const openLightbox = (item) => { lightbox.value = item; };
@@ -264,6 +291,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                             <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
                             <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
                         </div>
+                        <div v-if="item.contributor_name" class="tile-by" :title="item.contributor_name">{{ item.contributor_name }}</div>
                     </div>
                 </div>
 
@@ -271,7 +299,10 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <div v-for="item in videos" :key="item.id" class="video-card">
                         <video :src="item.url" :poster="item.thumb_url || undefined" controls preload="metadata" />
                         <div class="video-foot">
-                            <span class="video-name" :title="item.name">{{ item.name }}</span>
+                            <span class="video-name" :title="item.name">
+                                {{ item.name }}
+                                <em v-if="item.contributor_name" class="by"> · by {{ item.contributor_name }}</em>
+                            </span>
                             <div class="tile-actions" v-if="canEdit">
                                 <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
                                 <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
@@ -279,6 +310,52 @@ const openLightbox = (item) => { lightbox.value = item; };
                         </div>
                     </div>
                 </div>
+            </section>
+
+            <!-- Collect uploads — anonymous contribution links (owner only) -->
+            <section v-if="canEdit">
+                <div class="section-head">
+                    <h3>Collect uploads</h3>
+                </div>
+                <Card>
+                    <template #content>
+                        <p class="collect-intro">
+                            Create a link you can text to band members or the audience. Anyone
+                            with it can add photos and videos straight from their phone — no
+                            account needed. The uploads land in this event.
+                        </p>
+
+                        <form class="invite-form" @submit.prevent="submitInvite">
+                            <div class="field">
+                                <label for="i-label">Label <span class="optional">(optional)</span></label>
+                                <InputText id="i-label" v-model="inviteForm.label" placeholder="e.g. Band, Audience" :invalid="!!inviteForm.errors.label" />
+                            </div>
+                            <div class="field">
+                                <label for="i-exp">Expires <span class="optional">(optional)</span></label>
+                                <DatePicker id="i-exp" v-model="inviteForm.expires_at" dateFormat="yy-mm-dd" :minDate="new Date()" showIcon iconDisplay="input" placeholder="Never" />
+                            </div>
+                            <Button type="submit" icon="pi pi-link" label="Create link" :loading="inviteForm.processing" />
+                        </form>
+
+                        <ul v-if="invites.length" class="invite-list">
+                            <li v-for="invite in invites" :key="invite.id" class="invite-row">
+                                <div class="invite-meta">
+                                    <span class="invite-label">{{ invite.label || 'Upload link' }}</span>
+                                    <span class="invite-sub">
+                                        {{ invite.uploads_count }} upload{{ invite.uploads_count === 1 ? '' : 's' }}
+                                        <template v-if="invite.expires_at"> · expires {{ formatDate(invite.expires_at.slice(0, 10)) }}</template>
+                                        <Tag v-if="!invite.active" value="Expired" severity="warn" />
+                                    </span>
+                                    <code class="invite-url">{{ invite.url }}</code>
+                                </div>
+                                <div class="invite-actions">
+                                    <Button icon="pi pi-copy" label="Copy" size="small" severity="secondary" @click="copyInvite(invite)" />
+                                    <Button icon="pi pi-times" severity="danger" text rounded size="small" aria-label="Revoke link" @click="revokeInvite(invite)" />
+                                </div>
+                            </li>
+                        </ul>
+                    </template>
+                </Card>
             </section>
         </div>
 
@@ -370,4 +447,17 @@ const openLightbox = (item) => { lightbox.value = item; };
 .field :deep(.p-inputtext), .field :deep(.p-select), .field :deep(.p-datepicker) { width: 100%; }
 .field-row { display: flex; gap: 1rem; }
 .full { width: 100%; }
+.optional { font-weight: 400; color: var(--p-text-muted-color); }
+.by { font-style: normal; color: var(--p-text-muted-color); }
+.tile-by { position: absolute; left: 0.35rem; bottom: 0.35rem; right: 0.35rem; font-size: 0.7rem; color: #fff; background: rgba(0,0,0,0.45); border-radius: 5px; padding: 0.1rem 0.35rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collect-intro { margin: 0 0 1rem; color: var(--p-text-muted-color); font-size: 0.9rem; max-width: 42rem; }
+.invite-form { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+.invite-form .field { flex: 0 1 14rem; }
+.invite-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+.invite-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem; border: 1px solid var(--p-surface-200); border-radius: 8px; }
+.invite-meta { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+.invite-label { font-weight: 600; }
+.invite-sub { font-size: 0.8rem; color: var(--p-text-muted-color); display: flex; align-items: center; gap: 0.4rem; }
+.invite-url { font-size: 0.78rem; color: var(--p-text-muted-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 32rem; }
+.invite-actions { display: flex; align-items: center; gap: 0.25rem; flex-shrink: 0; }
 </style>

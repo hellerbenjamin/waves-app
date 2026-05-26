@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\ChannelTemplateController;
+use App\Http\Controllers\ContributionController;
 use App\Http\Controllers\EventController;
 use App\Http\Controllers\MediaController;
 use App\Http\Controllers\ProfileController;
@@ -23,6 +24,19 @@ Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventContro
 // Per-item media share links.
 Route::get('/media/share/{media:share_token}', [MediaController::class, 'showShared'])->name('media.shared');
 Route::get('/media/share/{media:share_token}/stream', [MediaController::class, 'streamShared'])->name('media.shared-stream');
+
+// Anonymous contribution links — the inverse of sharing: the unguessable invite
+// token lets someone upload photos/videos into an event with no account. The
+// token (route-bound to an EventInvite) is the access control; no auth runs.
+Route::get('/contribute/{invite}', [ContributionController::class, 'show'])->name('contribute.show');
+Route::post('/contribute/{invite}/upload-url', [ContributionController::class, 'uploadUrl'])->name('contribute.upload-url');
+Route::put('/contribute/{invite}/upload', [ContributionController::class, 'uploadPut'])->middleware('signed')->name('contribute.upload-put');
+Route::post('/contribute/{invite}/multipart', [ContributionController::class, 'createMultipart'])->name('contribute.multipart.create');
+Route::get('/contribute/{invite}/multipart/sign', [ContributionController::class, 'signPart'])->name('contribute.multipart.sign');
+Route::post('/contribute/{invite}/multipart/complete', [ContributionController::class, 'completeMultipart'])->name('contribute.multipart.complete');
+Route::post('/contribute/{invite}/multipart/abort', [ContributionController::class, 'abortMultipart'])->name('contribute.multipart.abort');
+Route::post('/contribute/{invite}/cleanup', [ContributionController::class, 'cleanup'])->name('contribute.cleanup');
+Route::post('/contribute/{invite}', [ContributionController::class, 'store'])->name('contribute.store');
 
 Route::get('/', function () {
     return Inertia::render('Welcome', [
@@ -72,6 +86,11 @@ Route::middleware('auth')->group(function () {
     Route::delete('/events/{event}/share', [EventController::class, 'unshare'])->name('events.unshare');
     Route::post('/events/{event}/tracks', [EventController::class, 'attachTracks'])->name('events.tracks.attach');
     Route::delete('/events/{event}/tracks/{track}', [EventController::class, 'detachTrack'])->name('events.tracks.detach');
+
+    // Contribution links the owner mints and revokes. {eventInvite} (not the
+    // public {invite}) so it binds by id, sidestepping the by-token binder.
+    Route::post('/events/{event}/invites', [EventController::class, 'storeInvite'])->name('events.invites.store');
+    Route::delete('/events/{event}/invites/{eventInvite}', [EventController::class, 'destroyInvite'])->name('events.invites.destroy');
 
     // Media — photos and videos. Literal upload/multipart routes are declared
     // before the /media/{media} wildcards so they win the match.
