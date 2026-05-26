@@ -374,8 +374,8 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <template #content>
                         <p class="collect-intro">
                             Create a link you can text to band members or the audience. Anyone
-                            with it can add photos and videos straight from their phone — no
-                            account needed. The uploads land in this event.
+                            with it can add photos and videos straight from their phone without
+                            logging in. The uploads land in this event.
                         </p>
 
                         <form class="invite-form" @submit.prevent="submitInvite">
