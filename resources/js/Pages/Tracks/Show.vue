@@ -654,6 +654,7 @@ const seekBy = (delta) => {
 // Space/J/K/L/←/→/Home for transport; ignored while typing in inputs so the
 // channel-label and region-name fields keep their normal keys.
 const onKeyDown = (e) => {
+    if (!document.hasFocus()) return;
     const target = e.target;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
