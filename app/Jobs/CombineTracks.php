@@ -115,13 +115,6 @@ class CombineTracks implements ShouldQueue
                     'size' => $combinedSize,
                 ]);
 
-                // Reparent split-children of any source so we don't orphan them
-                // when their parent row goes away. The combined track is the
-                // logical successor.
-                Track::query()
-                    ->whereIn('parent_track_id', $ordered->pluck('id'))
-                    ->update(['parent_track_id' => $combined->id]);
-
                 Track::query()
                     ->whereIn('id', $ordered->pluck('id'))
                     ->delete();
@@ -282,7 +275,7 @@ class CombineTracks implements ShouldQueue
         }
     }
 
-    /** Mirror SplitTrackSegment: append ".wav" iff the user didn't include it. */
+    /** Append ".wav" iff the user didn't include it. */
     private function finalName(): string
     {
         return preg_match('/\.wav$/i', $this->name) ? $this->name : $this->name.'.wav';

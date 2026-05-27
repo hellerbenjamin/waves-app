@@ -51,8 +51,6 @@ const isPlaying = ref(false);
 const currentTime = ref(0);
 const activeRegionId = ref(null);
 
-// Detection sliders. Defaults mirror the server-side DetectSongs job so the
-// "feel" stays the same across the two paths.
 const silenceDb = ref(-40);
 const minSilence = ref(1.5);
 const minRegion = ref(30);

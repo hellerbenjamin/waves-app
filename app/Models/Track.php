@@ -6,7 +6,6 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Track extends Model
 {
@@ -15,7 +14,6 @@ class Track extends Model
     protected $fillable = [
         'user_id',
         'event_id',
-        'parent_track_id',
         's3_key',
         'original_name',
         'mime',
@@ -28,13 +26,11 @@ class Track extends Model
         'default_mix',
         'duration_seconds',
         'share_token',
-        'split_proposal',
     ];
 
     protected $casts = [
         'channel_labels' => 'array',
         'default_mix' => 'array',
-        'split_proposal' => 'array',
         'size' => 'integer',
         'channels_count' => 'integer',
         'sample_rate' => 'integer',
@@ -50,17 +46,6 @@ class Track extends Model
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class);
-    }
-
-    public function parent(): BelongsTo
-    {
-        return $this->belongsTo(Track::class, 'parent_track_id');
-    }
-
-    /** Children created by splitting this track. */
-    public function children(): HasMany
-    {
-        return $this->hasMany(Track::class, 'parent_track_id');
     }
 
     /** Cheap columns the track cards render from — never carries the peaks envelope (it lives in object storage). */

@@ -158,7 +158,6 @@ export function detectSilences(rmsPerWindow, timing, opts = {}) {
 
 /**
  * Convert silence ranges to candidate song regions: the gaps between them.
- * Mirrors {@see App\Jobs\DetectSongs::invert} so the client and server agree.
  *
  * @param {{start:number,end:number}[]} silences
  * @param {number} durationSeconds
