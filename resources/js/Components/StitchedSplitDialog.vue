@@ -7,6 +7,9 @@ import ProgressBar from 'primevue/progressbar';
 import Message from 'primevue/message';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
+import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
+import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
+import Slider from 'primevue/slider';
 import { readWavHeaders, buildStitchedSegmentBlob } from '@/lib/wav.js';
 
 /**
@@ -49,6 +52,13 @@ const isPlaying = ref(false);
 const currentTime = ref(0);
 const activeRegionId = ref(null);
 
+// Zoom is expressed as a multiple of "fit to container": 1 = whole timeline
+// visible, 10 = ten times more pixels per second (horizontal scrolling). The
+// slider drives it; the wheel-zoom plugin also nudges it on Ctrl/⌘+wheel.
+const zoomLevel = ref(1);
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 50;
+
 let ws = null;
 let regionsPlugin = null;
 let regionDragUnsub = null;
@@ -82,6 +92,15 @@ const formatBytes = (n) => {
 const cssVar = (name, fallback) => {
     const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     return v || fallback;
+};
+
+// Pixel-per-second density that fits the whole timeline inside the waveform
+// container. Read live each time the zoom slider moves so a window resize
+// stays in sync.
+const basePxPerSec = () => {
+    const w = waveformEl.value?.clientWidth ?? 0;
+    const dur = stitched.value?.totalDurationSeconds ?? 0;
+    return dur > 0 && w > 0 ? w / dur : 0;
 };
 
 const regionColor = (i) => [
@@ -185,13 +204,22 @@ const renderWaveform = () => {
 
     ws?.destroy();
     regionsPlugin = RegionsPlugin.create();
+    const timelinePlugin = TimelinePlugin.create({ height: 18 });
+    // Ctrl/⌘+wheel zooms; bare wheel keeps the dialog scrollable.
+    const zoomPlugin = ZoomPlugin.create({
+        scale: 0.25,
+        maxZoom: ZOOM_MAX * basePxPerSec(),
+    });
 
     const config = {
         container: waveformEl.value,
         peaks: [peaks.value],
         duration: stitched.value.totalDurationSeconds,
         interact: true,
-        height: 96,
+        height: 160,
+        // Base zoom = fit to container. Wavesurfer renders at exactly this
+        // density at zoom=1; we multiply on slider changes.
+        minPxPerSec: basePxPerSec(),
         waveColor: cssVar('--p-primary-200', '#c7d2fe'),
         progressColor: cssVar('--p-primary-color', '#6366f1'),
         cursorColor: cssVar('--p-primary-color', '#6366f1'),
@@ -199,17 +227,29 @@ const renderWaveform = () => {
         barGap: 1,
         barRadius: 2,
         normalize: false,
-        plugins: [regionsPlugin],
+        plugins: [regionsPlugin, timelinePlugin, zoomPlugin],
     };
     if (playerUrl.value) config.url = playerUrl.value;
     ws = WaveSurfer.create(config);
+
+    // Keep our local slider in sync if the user zooms with the wheel.
+    ws.on('zoom', (pxPerSec) => {
+        const base = basePxPerSec();
+        if (base > 0) zoomLevel.value = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pxPerSec / base));
+    });
 
     isPlaying.value = false;
     currentTime.value = 0;
 
     if (playerUrl.value) attachMultichannelGraph();
 
-    ws.on('ready', () => { syncRegionsToWaveform(); });
+    ws.on('ready', () => {
+        syncRegionsToWaveform();
+        installBoundaryMarkers();
+    });
+    // Markers live inside wavesurfer's wrapper, which is rebuilt on decode —
+    // re-install whenever wavesurfer re-renders so they don't get orphaned.
+    ws.on('redraw', () => { installBoundaryMarkers(); });
     ws.on('play', () => { isPlaying.value = true; });
     ws.on('pause', () => { isPlaying.value = false; });
     ws.on('finish', () => { isPlaying.value = false; });
@@ -255,6 +295,45 @@ const attachMultichannelGraph = () => {
         audioSource = null;
         audioNodes = [];
     }
+};
+
+const applyZoom = () => {
+    const base = basePxPerSec();
+    if (!ws || base <= 0) return;
+    ws.zoom(base * zoomLevel.value);
+    positionBoundaryMarkers();
+};
+
+watch(zoomLevel, applyZoom);
+
+// Boundary markers live inside wavesurfer's internal scrolling wrapper so they
+// scroll with the waveform when zoomed. We attach them once on render and
+// reposition on every zoom change — their seconds-to-pixels math depends on
+// the current pxPerSec, which changes whenever ws.zoom() is called.
+const boundaryEls = [];
+const positionBoundaryMarkers = () => {
+    if (!ws || !stitched.value) return;
+    const base = basePxPerSec();
+    const pxPerSec = base * zoomLevel.value;
+    boundaryEls.forEach((el, i) => {
+        const seconds = stitched.value.sources[i].endSeconds;
+        el.style.left = `${seconds * pxPerSec}px`;
+    });
+};
+
+const installBoundaryMarkers = () => {
+    boundaryEls.length = 0;
+    const wrapper = ws?.getWrapper?.();
+    if (!wrapper || !stitched.value) return;
+    // Skip the trailing total; only interior boundaries are interesting.
+    const interior = stitched.value.sources.slice(0, -1);
+    for (const _src of interior) {
+        const el = document.createElement('div');
+        el.className = 'ws-boundary-marker';
+        wrapper.appendChild(el);
+        boundaryEls.push(el);
+    }
+    positionBoundaryMarkers();
 };
 
 const togglePlay = () => {
@@ -335,15 +414,6 @@ const renameRegion = (id, name) => {
     regionsPlugin?.getRegions().find((rr) => rr.id === id)?.setOptions({ content: name });
 };
 
-const sourceBoundaryMarkers = computed(() => {
-    if (!stitched.value || !stitched.value.totalDurationSeconds) return [];
-    const total = stitched.value.totalDurationSeconds;
-    // Skip the leading 0 and trailing total; only the interior boundaries matter.
-    return stitched.value.sources
-        .slice(0, -1)
-        .map((s) => ({ seconds: s.endSeconds, leftPct: (s.endSeconds / total) * 100 }));
-});
-
 const canCommit = computed(() =>
     phase.value === 'ready'
     && regions.value.length > 0
@@ -367,6 +437,10 @@ const teardown = () => {
     audioCtx?.close?.().catch(() => {});
     audioCtx = null;
 
+    // Markers were appended inside wavesurfer's wrapper; destroying ws drops
+    // that subtree, so just forget our references.
+    boundaryEls.length = 0;
+
     ws?.destroy();
     ws = null;
     regionsPlugin = null;
@@ -383,6 +457,7 @@ const teardown = () => {
     stitched.value = null;
     phase.value = 'idle';
     playbackUnavailable.value = false;
+    zoomLevel.value = 1;
 };
 
 onBeforeUnmount(teardown);
@@ -432,7 +507,7 @@ const dialogVisible = computed({
         v-model:visible="dialogVisible"
         modal
         :closable="phase !== 'committing'"
-        :style="{ width: 'min(95vw, 64rem)' }"
+        :style="{ width: 'min(98vw, 96rem)' }"
         header="Stitch and split recording"
         @hide="onCancel"
     >
@@ -466,17 +541,10 @@ const dialogVisible = computed({
             </div>
 
             <template v-if="phase === 'ready' || phase === 'committing'">
-                <div class="waveform-wrap">
-                    <div ref="waveformEl" class="dialog-waveform" />
-                    <!-- Visual hints for where each source file ends inside the stitched timeline. -->
-                    <div
-                        v-for="(b, i) in sourceBoundaryMarkers"
-                        :key="i"
-                        class="boundary-marker"
-                        :style="{ left: `${b.leftPct}%` }"
-                        :title="`File boundary at ${formatTime(b.seconds)}`"
-                    />
-                </div>
+                <!-- Boundary markers are appended into wavesurfer's internal
+                     scroll wrapper at render time so they scroll with the
+                     waveform when zoomed (see installBoundaryMarkers). -->
+                <div ref="waveformEl" class="dialog-waveform" />
 
                 <div class="transport">
                     <Button
@@ -489,6 +557,12 @@ const dialogVisible = computed({
                     <span class="transport-time">
                         {{ formatTime(currentTime) }} / {{ formatTime(stitched?.totalDurationSeconds ?? 0) }}
                     </span>
+                    <div class="zoom-control">
+                        <i class="pi pi-search-minus zoom-icon" />
+                        <Slider v-model="zoomLevel" :min="ZOOM_MIN" :max="ZOOM_MAX" :step="0.5" class="zoom-slider" />
+                        <i class="pi pi-search-plus zoom-icon" />
+                        <span class="zoom-readout">{{ zoomLevel.toFixed(1) }}×</span>
+                    </div>
                 </div>
 
                 <div v-if="regions.length" class="region-list">
@@ -556,17 +630,25 @@ const dialogVisible = computed({
 .file-summary-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 0.875rem; }
 .file-summary ul { margin: 0.375rem 0 0; padding-left: 1.125rem; font-size: 0.8125rem; color: var(--p-text-muted-color); }
 
-.waveform-wrap { position: relative; }
 .dialog-waveform { width: 100%; }
-.boundary-marker {
+/* Boundary markers live inside wavesurfer's internal scroll wrapper so they
+   scroll with the audio when zoomed in. Position is absolute, in pixels,
+   set imperatively from installBoundaryMarkers / positionBoundaryMarkers. */
+:deep(.ws-boundary-marker) {
     position: absolute;
     top: 0;
     bottom: 0;
     width: 0;
     border-left: 1px dashed var(--p-text-muted-color);
     pointer-events: none;
-    opacity: 0.55;
+    opacity: 0.6;
+    z-index: 4;
 }
+
+.zoom-control { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; min-width: 16rem; }
+.zoom-slider { flex: 1 1 auto; }
+.zoom-icon { font-size: 0.8125rem; color: var(--p-text-muted-color); }
+.zoom-readout { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; min-width: 2.75rem; text-align: right; }
 
 .scan-progress { display: flex; flex-direction: column; gap: 0.5rem; }
 .scan-progress p { margin: 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
