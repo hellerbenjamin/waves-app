@@ -43,6 +43,14 @@ const peaks = ref([]);
 const regions = ref([]); // [{ id, start, end, name }]
 const baseName = ref('');
 
+// Local playback so the user can audition regions before labelling them.
+// The source File is exposed to wavesurfer as a Blob URL — no upload, no
+// re-decode (peaks + duration are still seeded from our worker scan).
+const playerUrl = shallowRef(null);
+const isPlaying = ref(false);
+const currentTime = ref(0);
+const activeRegionId = ref(null);
+
 // Detection sliders. Defaults mirror the server-side DetectSongs job so the
 // "feel" stays the same across the two paths.
 const silenceDb = ref(-40);
@@ -53,6 +61,15 @@ let ws = null;
 let regionsPlugin = null;
 let regionDragUnsub = null;
 let suppressRegionEvents = false;
+
+// A plain <audio> element only outputs the first two channels of a multichannel
+// WAV, so we splice a Web Audio graph between wavesurfer's media element and
+// the speakers: ChannelSplitter → one gain per channel → centered panner →
+// destination. Every channel ends up audible in both L and R. Mirrors the
+// approach in Pages/Tracks/Show.vue (minus the per-channel mixer UI).
+let audioCtx = null;
+let audioSource = null;
+let audioNodes = []; // [{ gain, panner }] retained for clean disconnect
 
 // Heavy scan runs once in a Web Worker; the result is cached so re-detection
 // on every slider tick is a fast in-memory pass on the main thread.
@@ -94,6 +111,10 @@ watch(() => props.visible, async (open) => {
     scanProgress.value = 0;
     errorMessage.value = '';
     baseName.value = (props.file.name || 'Track').replace(/\.[^.]+$/, '') || 'Track';
+
+    // Object URL stays alive for the whole dialog session so the player can
+    // seek freely. teardown() revokes it.
+    playerUrl.value = URL.createObjectURL(props.file);
 
     try {
         header.value = await readWavHeader(props.file);
@@ -185,14 +206,17 @@ const renderWaveform = () => {
     regionsPlugin = RegionsPlugin.create();
     ws = WaveSurfer.create({
         container: waveformEl.value,
+        // Local Blob URL of the source File so playback works without an
+        // upload; the precomputed peaks + duration skip wavesurfer's own
+        // decode pass on multi-gigabyte files.
+        url: playerUrl.value,
         peaks: [peaks.value],
         duration: header.value.durationSeconds,
-        // No media — this is a non-playable preview surface for region editing.
         interact: true,
         height: 96,
         waveColor: cssVar('--p-primary-200', '#c7d2fe'),
         progressColor: cssVar('--p-primary-color', '#6366f1'),
-        cursorColor: 'transparent',
+        cursorColor: cssVar('--p-primary-color', '#6366f1'),
         barWidth: 2,
         barGap: 1,
         barRadius: 2,
@@ -200,11 +224,92 @@ const renderWaveform = () => {
         plugins: [regionsPlugin],
     });
 
+    isPlaying.value = false;
+    currentTime.value = 0;
+
+    // wavesurfer wires the media element synchronously, so we can attach the
+    // splitter graph immediately and it's in place by the time the user hits
+    // play (createMediaElementSource has to happen before playback starts to
+    // route the audio).
+    attachMultichannelGraph();
+
+    ws.on('play', () => { isPlaying.value = true; });
+    ws.on('pause', () => { isPlaying.value = false; });
+    ws.on('finish', () => { isPlaying.value = false; });
+    ws.on('timeupdate', (t) => {
+        currentTime.value = t;
+        // Drop the "active region" highlight when playback leaves it so the
+        // play/pause icon on the row reverts to play.
+        if (activeRegionId.value) {
+            const r = regions.value.find((x) => x.id === activeRegionId.value);
+            if (r && (t < r.start || t > r.end)) activeRegionId.value = null;
+        }
+    });
+
     bindRegionEvents();
     syncRegionsToWaveform();
     // Drag on empty waveform space to add a new region.
     regionDragUnsub?.();
     regionDragUnsub = regionsPlugin.enableDragSelection({ color: 'rgba(99, 102, 241, 0.15)' });
+};
+
+const attachMultichannelGraph = () => {
+    const channels = header.value?.channels ?? 0;
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const audioEl = ws?.getMediaElement?.();
+    if (!Ctx || !audioEl || channels < 1) return;
+
+    try {
+        audioCtx = new Ctx();
+        audioSource = audioCtx.createMediaElementSource(audioEl);
+        const splitter = audioCtx.createChannelSplitter(channels);
+        audioSource.connect(splitter);
+
+        for (let i = 0; i < channels; i++) {
+            const gain = audioCtx.createGain();
+            gain.gain.value = 1;
+            const panner = audioCtx.createStereoPanner();
+            panner.pan.value = 0; // sum each channel equally into L and R
+
+            splitter.connect(gain, i, 0);
+            gain.connect(panner);
+            panner.connect(audioCtx.destination);
+
+            audioNodes.push({ gain, panner });
+        }
+    } catch (e) {
+        // If we can't build the graph (e.g. a second createMediaElementSource
+        // on the same element), playback still works through the native
+        // element — just limited to its first two channels.
+        audioCtx = null;
+        audioSource = null;
+        audioNodes = [];
+    }
+};
+
+const togglePlay = () => {
+    if (!ws) return;
+    // AudioContext starts suspended until a user gesture; resume on the
+    // play click so the multichannel graph actually outputs sound.
+    audioCtx?.resume?.();
+    activeRegionId.value = null; // full-track play, not a region
+    ws.playPause();
+};
+
+// Play just the named region: seek to its start, play, and stop at its end.
+// wavesurfer-regions exposes a per-region .play() that handles the stop edge.
+const playRegion = (id) => {
+    const r = regions.value.find((x) => x.id === id);
+    const regionObj = regionsPlugin?.getRegions().find((rr) => rr.id === id);
+    if (!ws || !r || !regionObj) return;
+
+    if (activeRegionId.value === id && isPlaying.value) {
+        ws.pause();
+        return;
+    }
+    audioCtx?.resume?.();
+    activeRegionId.value = id;
+    regionObj.play();
 };
 
 const bindRegionEvents = () => {
@@ -271,9 +376,29 @@ const teardown = () => {
     framesPerWindowCache = 0;
     regionDragUnsub?.();
     regionDragUnsub = null;
+    // Disconnect the multichannel graph before destroying ws — leaving a
+    // MediaElementSource attached to a closed context can wedge the element
+    // for any subsequent open.
+    audioNodes.forEach(({ gain, panner }) => {
+        try { gain.disconnect(); } catch {}
+        try { panner.disconnect(); } catch {}
+    });
+    audioNodes = [];
+    try { audioSource?.disconnect(); } catch {}
+    audioSource = null;
+    audioCtx?.close?.().catch(() => {});
+    audioCtx = null;
+
     ws?.destroy();
     ws = null;
     regionsPlugin = null;
+    if (playerUrl.value) {
+        URL.revokeObjectURL(playerUrl.value);
+        playerUrl.value = null;
+    }
+    isPlaying.value = false;
+    currentTime.value = 0;
+    activeRegionId.value = null;
     regions.value = [];
     peaks.value = [];
     header.value = null;
@@ -357,6 +482,18 @@ const dialogVisible = computed({
             <template v-if="phase === 'ready' || phase === 'committing'">
                 <div ref="waveformEl" class="dialog-waveform" />
 
+                <div class="transport">
+                    <Button
+                        :icon="isPlaying && !activeRegionId ? 'pi pi-pause' : 'pi pi-play'"
+                        :label="isPlaying && !activeRegionId ? 'Pause' : 'Play'"
+                        size="small"
+                        @click="togglePlay"
+                    />
+                    <span class="transport-time">
+                        {{ formatTime(currentTime) }} / {{ formatTime(header?.durationSeconds ?? 0) }}
+                    </span>
+                </div>
+
                 <div class="split-params">
                     <div class="split-param">
                         <label>Silence threshold <span class="split-param-val">{{ silenceDb }} dB</span></label>
@@ -375,6 +512,14 @@ const dialogVisible = computed({
                 <div v-if="regions.length" class="region-list">
                     <div v-for="(r, i) in regions" :key="r.id" class="region-row">
                         <span class="region-index">{{ i + 1 }}</span>
+                        <Button
+                            :icon="activeRegionId === r.id && isPlaying ? 'pi pi-pause' : 'pi pi-play'"
+                            text
+                            rounded
+                            size="small"
+                            :aria-label="`Play region ${i + 1}`"
+                            @click="playRegion(r.id)"
+                        />
                         <InputText
                             :model-value="r.name"
                             class="region-name"
@@ -430,11 +575,17 @@ const dialogVisible = computed({
 .region-list { display: flex; flex-direction: column; gap: 0.5rem; }
 .region-row {
     display: grid;
-    grid-template-columns: 1.5rem 1fr auto auto;
+    grid-template-columns: 1.5rem auto 1fr auto auto;
     gap: 0.75rem;
     align-items: center;
     padding: 0.375rem 0;
     border-bottom: 1px solid var(--p-content-border-color);
+}
+.transport { display: flex; align-items: center; gap: 0.75rem; }
+.transport-time {
+    font-size: 0.8125rem;
+    color: var(--p-text-muted-color);
+    font-variant-numeric: tabular-nums;
 }
 .region-row:last-child { border-bottom: none; }
 .region-index { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; }
