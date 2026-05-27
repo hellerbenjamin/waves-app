@@ -2,7 +2,7 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\ExtractPeaks;
+use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Event;
 use App\Models\Track;
 use App\Models\User;
@@ -53,19 +53,17 @@ class TrackTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_show_renders_track_with_presigned_stream_url(): void
+    public function test_show_renders_a_transcoded_track_as_ready_with_null_legacy_stream(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create(['original_name' => 'mix.wav']);
+        $track = Track::factory()->for($user)->withChannels()->create(['original_name' => 'mix.wav']);
 
-        // On s3 the player loads a presigned object URL directly (not the app
-        // stream route) so it stays CORS-clean for the mixer. The peaks JSON is
-        // fetched the same way — a second presign on the sibling .peaks.json
-        // key, which the mixer pulls async.
+        // Transcoded tracks no longer carry a single-WAV stream URL — playback
+        // is per-channel. The legacy stream_url/peaks_url fields stay in the
+        // payload until the player consumes channels instead, but they resolve
+        // to null once s3_key is cleared. No presign should happen.
         $disk = Mockery::mock(AwsS3V3Adapter::class);
-        $disk->shouldReceive('temporaryUrl')
-            ->twice()
-            ->andReturn('https://s3.example/signed-peaks', 'https://s3.example/signed-stream');
+        $disk->shouldNotReceive('temporaryUrl');
         Storage::shouldReceive('disk')->andReturn($disk);
 
         $this->actingAs($user)
@@ -75,10 +73,10 @@ class TrackTest extends TestCase
                 ->component('Tracks/Show')
                 ->where('track.id', $track->id)
                 ->where('track.name', 'mix.wav')
-                ->where('track.peaks_ready', true)
+                ->where('track.ready', true)
                 ->where('track.channels_count', 1)
-                ->where('track.stream_url', 'https://s3.example/signed-stream')
-                ->where('track.peaks_url', 'https://s3.example/signed-peaks')
+                ->where('track.stream_url', null)
+                ->where('track.peaks_url', null)
                 ->where('track.stream_cross_origin', 'anonymous') // s3 disk in tests
             );
     }
@@ -86,7 +84,7 @@ class TrackTest extends TestCase
     public function test_update_403s_for_other_users_track(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for(User::factory())->withPeaks()->create();
+        $track = Track::factory()->for(User::factory())->withChannels()->create();
 
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['Kick']])
@@ -97,7 +95,6 @@ class TrackTest extends TestCase
     {
         $user = User::factory()->create();
         $track = Track::factory()->for($user)->create([
-            'peaks_ready' => true,
             'channels_count' => 2,
             'sample_rate' => 44100,
             'duration_seconds' => 10.0,
@@ -117,7 +114,6 @@ class TrackTest extends TestCase
         $track = Track::factory()->for($user)->create([
             'original_name' => 'old.wav',
             'channel_labels' => ['Kick', 'Snare'],
-            'peaks_ready' => true,
             'channels_count' => 2,
             'sample_rate' => 44100,
             'duration_seconds' => 10.0,
@@ -136,7 +132,7 @@ class TrackTest extends TestCase
     public function test_update_rejects_blank_rename(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['original_name' => '   '])
@@ -147,7 +143,7 @@ class TrackTest extends TestCase
     public function test_update_rejects_more_labels_than_channels(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create(); // 1 channel
+        $track = Track::factory()->for($user)->withChannels()->create(); // 1 channel
 
         $this->actingAs($user)
             ->patchJson("/tracks/{$track->id}", ['channel_labels' => ['a', 'b']])
@@ -295,7 +291,7 @@ class TrackTest extends TestCase
             ->assertStatus(422);
 
         $this->assertDatabaseCount('tracks', 0);
-        Bus::assertNotDispatched(ExtractPeaks::class);
+        Bus::assertNotDispatched(TranscodeTrackToChannels::class);
     }
 
     public function test_store_creates_track_and_dispatches_peaks_job(): void
@@ -323,7 +319,7 @@ class TrackTest extends TestCase
             'size' => 14,
         ]);
 
-        Bus::assertDispatched(ExtractPeaks::class, fn ($job) => $job->track->s3_key === $key);
+        Bus::assertDispatched(TranscodeTrackToChannels::class, fn ($job) => $job->track->s3_key === $key);
     }
 
     public function test_store_assigns_the_track_to_an_owned_event(): void

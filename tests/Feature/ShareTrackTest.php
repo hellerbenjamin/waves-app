@@ -62,15 +62,15 @@ class ShareTrackTest extends TestCase
 
     public function test_public_show_renders_for_a_valid_token_without_auth(): void
     {
-        $track = Track::factory()->for(User::factory())->withPeaks()->create([
+        $track = Track::factory()->for(User::factory())->withChannels()->create([
             'share_token' => 'publicshowtoken12345',
             'original_name' => 'shared.wav',
         ]);
 
-        // A public share page must stay revocable, so it embeds the token-scoped
-        // app stream route (which 404s the moment the token is cleared) rather
-        // than baking in a long-lived presigned URL. The presigned URL is minted
-        // fresh per request by the stream endpoint instead.
+        // Per-channel streaming hasn't been wired into the presenter yet; the
+        // legacy single-WAV stream URL resolves to null for transcoded tracks.
+        // The share token is still the access control — the channel-aware URLs
+        // will be issued from the same token once the player refactor lands.
         $this->get('/share/publicshowtoken12345')
             ->assertOk()
             ->assertInertia(fn ($page) => $page
@@ -78,7 +78,8 @@ class ShareTrackTest extends TestCase
                 ->where('canEdit', false)
                 ->where('track.id', $track->id)
                 ->where('track.name', 'shared.wav')
-                ->where('track.stream_url', route('tracks.shared-stream', $track->share_token))
+                ->where('track.ready', true)
+                ->where('track.stream_url', null)
                 ->where('track.stream_cross_origin', 'anonymous')
             );
     }

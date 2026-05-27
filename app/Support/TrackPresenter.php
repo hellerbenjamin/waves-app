@@ -32,7 +32,9 @@ class TrackPresenter
             // Saved mixer state both views initialise to. Shared viewers see it
             // applied but can't save changes back (the update route is auth'd).
             'default_mix' => $track->default_mix,
-            'peaks_ready' => (bool) $track->peaks_ready,
+            // A track is "ready" once the transcode job has populated its
+            // per-channel rows; until then it has only the staged source WAV.
+            'ready' => $track->channels()->exists(),
             // Peaks JSON lives in object storage; the mixer fetches it via this
             // URL instead of receiving it inline in the Inertia payload.
             'peaks_url' => $this->storage->peaksUrl($track, $peaksRoute, $shared),

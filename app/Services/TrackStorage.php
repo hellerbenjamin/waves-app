@@ -103,8 +103,15 @@ class TrackStorage
      * mints a fresh short-lived URL per request and 404s the moment the share
      * token is cleared. Local disks always use the route regardless.
      */
-    public function playbackUrl(Track $track, string $localRoute, bool $shared = false): string
+    public function playbackUrl(Track $track, string $localRoute, bool $shared = false): ?string
     {
+        // After transcoding, there is no single-WAV stream URL — the player
+        // pulls per-channel Opus directly. The legacy stream/peaks fields stay
+        // in the payload until the player refactor consumes channels instead.
+        if ($track->s3_key === null) {
+            return null;
+        }
+
         if ($this->isS3() && ! $shared) {
             return $this->disk()->temporaryUrl($track->s3_key, now()->addHours(6));
         }
@@ -181,7 +188,10 @@ class TrackStorage
      */
     public function peaksUrl(Track $track, string $localRoute, bool $shared = false): ?string
     {
-        if (! $track->peaks_ready) {
+        // The legacy single-track peaks JSON lived alongside the source WAV.
+        // After transcoding, peaks are per-channel and live on TrackChannel
+        // rows — callers should read them from there.
+        if ($track->s3_key === null) {
             return null;
         }
 

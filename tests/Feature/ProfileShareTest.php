@@ -86,7 +86,7 @@ class ProfileShareTest extends TestCase
 
         $user = User::factory()->create(['share_token' => Str::random(32)]);
         $event = Event::factory()->for($user)->create();
-        Track::factory()->for($user)->withPeaks()->create(['event_id' => $event->id]);
+        Track::factory()->for($user)->withChannels()->create(['event_id' => $event->id]);
 
         $this->get("/u/{$user->share_token}/events/{$event->id}")
             ->assertOk()

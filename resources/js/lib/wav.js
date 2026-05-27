@@ -122,7 +122,7 @@ export async function readWavHeader(file) {
  * Build a standard 44-byte RIFF PCM header for a fresh data body. The output
  * is the canonical layout (no JUNK/fact/extensible chunks) — adequate for
  * every consumer we care about, including ffmpeg, the browser <audio>
- * element, and our own ExtractPeaks job.
+ * element, and our own server-side transcode job.
  *
  * @param {{ sampleRate:number, channels:number, bitsPerSample:number, dataLength:number }} spec
  * @returns {ArrayBuffer}

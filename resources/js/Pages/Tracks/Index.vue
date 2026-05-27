@@ -392,7 +392,7 @@ const submitRename = async () => {
                         </Column>
                         <Column header="Status">
                             <template #body="{ data }">
-                                <Tag v-if="data.peaks_ready" severity="success" value="Ready" />
+                                <Tag v-if="data.ready" severity="success" value="Ready" />
                                 <Tag v-else severity="warn" value="Processing" />
                             </template>
                         </Column>

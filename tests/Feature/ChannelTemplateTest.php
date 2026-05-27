@@ -73,7 +73,7 @@ class ChannelTemplateTest extends TestCase
         $mine = ChannelTemplate::factory()->for($user)->create(['name' => 'Mine']);
         ChannelTemplate::factory()->for(User::factory())->create(['name' => 'Theirs']);
 
-        $track = Track::factory()->for($user)->withPeaks()->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
         $this->actingAs($user)
             ->get("/tracks/{$track->id}")

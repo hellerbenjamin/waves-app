@@ -93,7 +93,7 @@ class EventTest extends TestCase
 
         $user = User::factory()->create();
         $event = Event::factory()->for($user)->create();
-        Track::factory()->for($user)->withPeaks()->create(['event_id' => $event->id]);
+        Track::factory()->for($user)->withChannels()->create(['event_id' => $event->id]);
         Media::factory()->for($user)->withThumb()->create(['event_id' => $event->id]);
 
         $this->actingAs($user)

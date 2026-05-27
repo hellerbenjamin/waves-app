@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreTrackRequest;
 use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
-use App\Jobs\ExtractPeaks;
+use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Track;
 use App\Services\TrackStorage;
 use App\Support\TrackPresenter;
@@ -32,7 +32,8 @@ class TrackController extends Controller
         $tracks = $request->user()
             ->tracks()
             ->with('event:id,name')
-            ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'peaks_ready', 'created_at'])
+            ->withExists('channels')
+            ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'created_at'])
             ->latest()
             ->get()
             ->map(fn (Track $t) => [
@@ -40,7 +41,8 @@ class TrackController extends Controller
                 'name' => $t->original_name,
                 'size' => $t->size,
                 'duration_seconds' => $t->duration_seconds,
-                'peaks_ready' => $t->peaks_ready,
+                // Channels exist iff the transcode job has finished.
+                'ready' => (bool) $t->channels_exists,
                 'event_id' => $t->event_id,
                 'event' => $t->event ? ['id' => $t->event->id, 'name' => $t->event->name] : null,
                 'created_at' => $t->created_at?->toIso8601String(),
@@ -367,7 +369,7 @@ class TrackController extends Controller
             'size' => $request->validated('size'),
         ]);
 
-        ExtractPeaks::dispatch($track);
+        TranscodeTrackToChannels::dispatch($track);
 
         // Stay on whichever page the upload came from (track list or an event).
         return back();
@@ -377,11 +379,22 @@ class TrackController extends Controller
     {
         $this->authorize('delete', $track);
 
-        $this->storage->delete($track->s3_key);
-        // Best-effort peaks cleanup: the sibling .peaks.json may or may not
-        // exist (older tracks pre-regenerate, or extraction never completed),
-        // but a missing key is a no-op on both S3 and local disks.
-        $this->storage->delete($this->storage->peaksKey($track));
+        // Source WAV only exists between upload finalize and transcode; clear
+        // it (and its legacy sibling peaks JSON) if it's still around.
+        if ($track->s3_key !== null) {
+            $this->storage->delete($track->s3_key);
+            $this->storage->delete($this->storage->peaksKey($track));
+        }
+
+        // Per-channel Opus and peaks blobs. The DB rows cascade on track
+        // delete; storage cleanup is best-effort and survives a missing key.
+        foreach ($track->channels as $channel) {
+            $this->storage->delete($channel->s3_key);
+            if ($channel->peaks_s3_key !== null) {
+                $this->storage->delete($channel->peaks_s3_key);
+            }
+        }
+
         $track->delete();
 
         return back();

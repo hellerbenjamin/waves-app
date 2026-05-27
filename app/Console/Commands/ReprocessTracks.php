@@ -2,7 +2,7 @@
 
 namespace App\Console\Commands;
 
-use App\Jobs\ExtractPeaks;
+use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Track;
 use Illuminate\Console\Command;
 use Illuminate\Database\Eloquent\Builder;
@@ -11,10 +11,10 @@ class ReprocessTracks extends Command
 {
     protected $signature = 'tracks:reprocess
         {track?* : One or more track IDs; omit to target all tracks}
-        {--missing : Only tracks that have no peaks yet}
+        {--missing : Only tracks that have no per-channel rows yet}
         {--sync : Run inline instead of queueing (no queue:work needed)}';
 
-    protected $description = 'Re-run waveform peak extraction for tracks';
+    protected $description = 'Re-run the per-channel Opus transcode for tracks';
 
     public function handle(): int
     {
@@ -22,7 +22,7 @@ class ReprocessTracks extends Command
 
         $tracks = Track::query()
             ->when($ids, fn (Builder $q) => $q->whereIn('id', $ids))
-            ->when($this->option('missing'), fn (Builder $q) => $q->where('peaks_ready', false))
+            ->when($this->option('missing'), fn (Builder $q) => $q->whereDoesntHave('channels'))
             ->get();
 
         if ($tracks->isEmpty()) {
@@ -36,8 +36,8 @@ class ReprocessTracks extends Command
 
         foreach ($tracks as $track) {
             $sync
-                ? ExtractPeaks::dispatchSync($track)
-                : ExtractPeaks::dispatch($track);
+                ? TranscodeTrackToChannels::dispatchSync($track)
+                : TranscodeTrackToChannels::dispatch($track);
 
             $this->line("  #{$track->id}  {$track->original_name}");
         }
