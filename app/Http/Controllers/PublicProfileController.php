@@ -91,4 +91,11 @@ class PublicProfileController extends Controller
 
         return $this->media->streamResponse($media->thumb_key, 'image/jpeg');
     }
+
+    public function downloadMedia(User $user, Event $event, Media $media): SymfonyResponse
+    {
+        abort_unless($event->user_id === $user->id && $media->event_id === $event->id, 404);
+
+        return $this->media->downloadResponse($media);
+    }
 }

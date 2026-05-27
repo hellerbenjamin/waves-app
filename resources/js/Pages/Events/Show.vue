@@ -352,7 +352,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                         <input ref="trackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onTrackSelected" />
                         <Button
                             v-if="selectedTracksForCombine.length >= 2"
-                            :label="`Combine ${selectedTracksForCombine.length}…`"
+                            :label="`Combine ${selectedTracksForCombine.length}`"
                             icon="pi pi-link"
                             size="small"
                             @click="openCombine"
@@ -397,8 +397,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                                     <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
                                     <Button v-if="canEdit" icon="pi pi-times" severity="secondary" text rounded size="small" aria-label="Remove from event" @click="removeTrack(track)" />
                                 </div>
-                                <audio v-if="track.stream_url" :src="track.stream_url" :crossorigin="track.stream_cross_origin" controls preload="none" class="audio" />
-                                <Tag v-else severity="warn" value="Processing" />
+                                <Tag v-if="!track.stream_url" severity="warn" value="Processing" />
                             </div>
                         </div>
                     </template>
@@ -439,9 +438,14 @@ const openLightbox = (item) => { lightbox.value = item; };
                             <div v-else class="placeholder"><i :class="item.kind === 'video' ? 'pi pi-video' : 'pi pi-image'" /></div>
                             <span v-if="item.kind === 'video'" class="play-badge"><i class="pi pi-play-circle" /></span>
                         </button>
-                        <div class="tile-actions" v-if="canEdit">
-                            <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
-                            <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
+                        <div class="tile-actions">
+                            <a v-if="item.download_url" :href="item.download_url" :download="item.name" class="tile-download" aria-label="Download">
+                                <Button icon="pi pi-download" severity="secondary" text rounded size="small" tabindex="-1" />
+                            </a>
+                            <template v-if="canEdit">
+                                <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
+                                <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
+                            </template>
                         </div>
                         <div v-if="item.contributor_name" class="tile-by" :title="item.contributor_name">{{ item.contributor_name }}</div>
                     </div>
@@ -568,7 +572,6 @@ const openLightbox = (item) => { lightbox.value = item; };
 .track-link { flex: 1 1 auto; min-width: 0; color: var(--p-primary-color); text-decoration: none; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-link:hover { text-decoration: underline; }
 .track-dur { flex: 0 0 auto; font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--p-text-muted-color); }
-.audio { width: 100%; height: 2.5rem; }
 .empty { display: flex; flex-direction: column; align-items: center; gap: 0.6rem; padding: 2.5rem 1rem; border: 1px dashed var(--p-content-border-color); border-radius: 10px; color: var(--p-text-muted-color); }
 .empty i { font-size: 1.75rem; }
 .empty p { margin: 0; }
@@ -584,6 +587,7 @@ const openLightbox = (item) => { lightbox.value = item; };
 .play-badge { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 2.5rem; text-shadow: 0 2px 8px rgba(0,0,0,0.5); pointer-events: none; }
 .tile-actions { position: absolute; top: 0.25rem; right: 0.25rem; display: flex; gap: 0.15rem; background: rgba(0,0,0,0.45); border-radius: 6px; opacity: 0; transition: opacity 0.12s; }
 .tile-actions :deep(.p-button) { color: #fff; }
+.tile-download { display: inline-flex; line-height: 0; }
 .media-tile:hover .tile-actions, .media-tile:focus-within .tile-actions { opacity: 1; }
 .lightbox-img { max-width: 90vw; max-height: 85vh; display: block; }
 .form { display: flex; flex-direction: column; gap: 1rem; }

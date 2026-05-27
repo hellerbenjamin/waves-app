@@ -213,4 +213,11 @@ class EventController extends Controller
 
         return $this->media->streamResponse($media->thumb_key, 'image/jpeg');
     }
+
+    public function downloadSharedMedia(Event $event, Media $media): SymfonyResponse
+    {
+        abort_unless($media->event_id === $event->id, 404);
+
+        return $this->media->downloadResponse($media);
+    }
 }

@@ -94,6 +94,13 @@ class MediaController extends Controller
         return $this->storage->streamResponse($media->thumb_key, 'image/jpeg');
     }
 
+    public function download(Media $media): SymfonyResponse
+    {
+        $this->authorize('view', $media);
+
+        return $this->storage->downloadResponse($media);
+    }
+
     public function destroy(Media $media): RedirectResponse
     {
         $this->authorize('delete', $media);

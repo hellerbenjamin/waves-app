@@ -145,6 +145,39 @@ class MediaStorage
     }
 
     /**
+     * Build a download response for a media item: presign an S3 GET that forces
+     * Content-Disposition: attachment with the original filename, or fall back
+     * to a streamed file download on a local disk.
+     */
+    public function downloadResponse(Media $media): SymfonyResponse
+    {
+        $filename = $media->original_name ?: ('media-'.$media->id);
+
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl(
+                $media->s3_key,
+                now()->addMinutes(15),
+                array_filter([
+                    'ResponseContentDisposition' => 'attachment; filename="'.addslashes($filename).'"',
+                    'ResponseContentType' => $media->mime,
+                ]),
+            ));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($media->s3_key), 404);
+
+        return response()->download(
+            $disk->path($media->s3_key),
+            $filename,
+            array_filter(['Content-Type' => $media->mime]),
+        );
+    }
+
+    /**
      * The URL to load a media object (or its thumbnail) from in the page. For
      * an owner's own page an S3 disk is handed a presigned object URL directly;
      * the TTL must outlast a viewing session since URLs are baked in at render

@@ -22,6 +22,7 @@ Route::get('/events/share/{event:share_token}', [EventController::class, 'showSh
 Route::get('/events/share/{event:share_token}/tracks/{track}/stream', [EventController::class, 'streamSharedTrack'])->name('events.shared.track-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
+Route::get('/events/share/{event:share_token}/media/{media}/download', [EventController::class, 'downloadSharedMedia'])->name('events.shared.media-download');
 
 // A shared profile reaches all of a user's events (and their tracks/media)
 // through the single profile token, so events don't each need their own link.
@@ -30,6 +31,7 @@ Route::get('/u/{user:share_token}/events/{event}', [PublicProfileController::cla
 Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/stream', [PublicProfileController::class, 'streamTrack'])->name('profile.shared.track-stream');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/stream', [PublicProfileController::class, 'streamMedia'])->name('profile.shared.media-stream');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/thumb', [PublicProfileController::class, 'thumbMedia'])->name('profile.shared.media-thumb');
+Route::get('/u/{user:share_token}/events/{event}/media/{media}/download', [PublicProfileController::class, 'downloadMedia'])->name('profile.shared.media-download');
 
 // Per-item media share links.
 Route::get('/media/share/{media:share_token}', [MediaController::class, 'showShared'])->name('media.shared');
@@ -127,6 +129,7 @@ Route::middleware('auth')->group(function () {
     Route::post('/media', [MediaController::class, 'store'])->name('media.store');
     Route::get('/media/{media}/stream', [MediaController::class, 'stream'])->name('media.stream');
     Route::get('/media/{media}/thumb', [MediaController::class, 'thumb'])->name('media.thumb');
+    Route::get('/media/{media}/download', [MediaController::class, 'download'])->name('media.download');
     Route::delete('/media/{media}', [MediaController::class, 'destroy'])->name('media.destroy');
     Route::post('/media/{media}/share', [MediaController::class, 'share'])->name('media.share');
     Route::delete('/media/{media}/share', [MediaController::class, 'unshare'])->name('media.unshare');

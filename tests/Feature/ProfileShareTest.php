@@ -141,6 +141,30 @@ class ProfileShareTest extends TestCase
             ->assertNotFound();
     }
 
+    public function test_media_download_redirects_publicly_for_token_owner(): void
+    {
+        $user = User::factory()->create(['share_token' => Str::random(32)]);
+        $event = Event::factory()->for($user)->create();
+        $media = Media::factory()->for($user)->create(['event_id' => $event->id]);
+
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-download');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->get("/u/{$user->share_token}/events/{$event->id}/media/{$media->id}/download")
+            ->assertRedirect('https://s3.example/signed-download');
+    }
+
+    public function test_media_download_404s_when_event_not_owned_by_token_user(): void
+    {
+        $user = User::factory()->create(['share_token' => Str::random(32)]);
+        $foreignEvent = Event::factory()->for(User::factory())->create();
+        $media = Media::factory()->for($foreignEvent->user)->create(['event_id' => $foreignEvent->id]);
+
+        $this->get("/u/{$user->share_token}/events/{$foreignEvent->id}/media/{$media->id}/download")
+            ->assertNotFound();
+    }
+
     public function test_revoking_token_kills_the_public_links(): void
     {
         $user = User::factory()->create(['share_token' => Str::random(32)]);

@@ -236,4 +236,26 @@ class EventTest extends TestCase
         $this->get("/events/share/{$event->share_token}/media/{$media->id}/stream")
             ->assertNotFound();
     }
+
+    public function test_shared_media_download_redirects_publicly_for_member(): void
+    {
+        $event = Event::factory()->shared()->create();
+        $media = Media::factory()->for($event->user)->create(['event_id' => $event->id]);
+
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-download');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->get("/events/share/{$event->share_token}/media/{$media->id}/download")
+            ->assertRedirect('https://s3.example/signed-download');
+    }
+
+    public function test_shared_media_download_404s_for_non_member(): void
+    {
+        $event = Event::factory()->shared()->create();
+        $media = Media::factory()->for($event->user)->create(); // not in the event
+
+        $this->get("/events/share/{$event->share_token}/media/{$media->id}/download")
+            ->assertNotFound();
+    }
 }

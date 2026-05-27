@@ -187,6 +187,34 @@ class MediaTest extends TestCase
             ->assertRedirect('https://s3.example/signed');
     }
 
+    public function test_download_403s_for_other_users_media(): void
+    {
+        $user = User::factory()->create();
+        $media = Media::factory()->for(User::factory())->create();
+
+        $this->actingAs($user)->get("/media/{$media->id}/download")->assertForbidden();
+    }
+
+    public function test_download_redirects_to_presigned_url_with_attachment_disposition(): void
+    {
+        $user = User::factory()->create();
+        $media = Media::factory()->for($user)->create(['original_name' => 'beach day.jpg', 'mime' => 'image/jpeg']);
+
+        $disk = Mockery::mock(AwsS3V3Adapter::class);
+        $disk->shouldReceive('temporaryUrl')
+            ->once()
+            ->with($media->s3_key, Mockery::type(\DateTimeInterface::class), Mockery::on(function ($opts) {
+                return ($opts['ResponseContentDisposition'] ?? '') === 'attachment; filename="beach day.jpg"'
+                    && ($opts['ResponseContentType'] ?? '') === 'image/jpeg';
+            }))
+            ->andReturn('https://s3.example/signed-download');
+        Storage::shouldReceive('disk')->andReturn($disk);
+
+        $this->actingAs($user)
+            ->get("/media/{$media->id}/download")
+            ->assertRedirect('https://s3.example/signed-download');
+    }
+
     public function test_thumb_404s_when_no_thumbnail(): void
     {
         $user = User::factory()->create();

@@ -79,6 +79,7 @@ class EventPresenter
             'height' => $media->height,
             'url' => $this->media->objectUrl($media->s3_key, ($ctx->mediaStream)($media), $ctx->shared),
             'thumb_url' => $this->media->objectUrl($media->thumb_key, ($ctx->mediaThumb)($media), $ctx->shared),
+            'download_url' => ($ctx->mediaDownload)($media),
             'share_url' => (! $ctx->shared && $media->share_token) ? route('media.shared', $media->share_token) : null,
             'contributor_name' => $media->contributor_name,
             'created_at' => $media->created_at?->toIso8601String(),
