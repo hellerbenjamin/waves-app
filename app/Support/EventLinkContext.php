@@ -23,6 +23,9 @@ class EventLinkContext
      * @param  Closure(Media): string  $mediaStream
      * @param  Closure(Media): string  $mediaThumb
      * @param  Closure(Media): string  $mediaDownload
+     * @param  array<string, string>|null  $mediaUploadRoutes  Route URLs the
+     *         browser-driven upload composable needs (uploadUrl, multipart-*,
+     *         cleanup, store). Null when the audience can't upload.
      */
     public function __construct(
         public readonly bool $shared,
@@ -32,6 +35,7 @@ class EventLinkContext
         public readonly Closure $mediaThumb,
         public readonly Closure $mediaDownload,
         public readonly ?string $eventShareUrl,
+        public readonly ?array $mediaUploadRoutes = null,
     ) {}
 
     /** Owner-facing: cookie-auth in-app routes, presigned S3, all sections visible. */
@@ -45,20 +49,42 @@ class EventLinkContext
             mediaThumb: fn (Media $m) => route('media.thumb', $m->id),
             mediaDownload: fn (Media $m) => route('media.download', $m->id),
             eventShareUrl: $event->share_token ? route('events.shared', $event->share_token) : null,
+            mediaUploadRoutes: [
+                'uploadUrl' => route('media.upload-url'),
+                'multipartCreate' => route('media.multipart.create'),
+                'multipartSign' => route('media.multipart.sign'),
+                'multipartComplete' => route('media.multipart.complete'),
+                'multipartAbort' => route('media.multipart.abort'),
+                'cleanup' => route('media.cleanup'),
+                'store' => route('media.store'),
+            ],
         );
     }
 
     /** Public event-token share: items stream through the event's own token. */
     public static function eventShare(Event $event): self
     {
+        $t = $event->share_token;
+
         return new self(
             shared: true,
-            trackShow: fn (Track $t) => route('events.shared.track-show', [$event->share_token, $t->id]),
-            trackStream: fn (Track $t) => route('events.shared.track-stream', [$event->share_token, $t->id]),
-            mediaStream: fn (Media $m) => route('events.shared.media-stream', [$event->share_token, $m->id]),
-            mediaThumb: fn (Media $m) => route('events.shared.media-thumb', [$event->share_token, $m->id]),
-            mediaDownload: fn (Media $m) => route('events.shared.media-download', [$event->share_token, $m->id]),
-            eventShareUrl: route('events.shared', $event->share_token),
+            trackShow: fn (Track $t2) => route('events.shared.track-show', [$t, $t2->id]),
+            trackStream: fn (Track $t2) => route('events.shared.track-stream', [$t, $t2->id]),
+            mediaStream: fn (Media $m) => route('events.shared.media-stream', [$t, $m->id]),
+            mediaThumb: fn (Media $m) => route('events.shared.media-thumb', [$t, $m->id]),
+            mediaDownload: fn (Media $m) => route('events.shared.media-download', [$t, $m->id]),
+            eventShareUrl: route('events.shared', $t),
+            // Public share viewers can upload photos/videos through the same
+            // token — view and contribute live on one link.
+            mediaUploadRoutes: [
+                'uploadUrl' => route('events.shared.media-upload-url', $t),
+                'multipartCreate' => route('events.shared.media-multipart-create', $t),
+                'multipartSign' => route('events.shared.media-multipart-sign', $t),
+                'multipartComplete' => route('events.shared.media-multipart-complete', $t),
+                'multipartAbort' => route('events.shared.media-multipart-abort', $t),
+                'cleanup' => route('events.shared.media-cleanup', $t),
+                'store' => route('events.shared.media-store', $t),
+            ],
         );
     }
 

@@ -32,7 +32,10 @@ const props = defineProps({
 
 // Owners get the app chrome; public share links render under a guest layout.
 const Layout = props.canEdit ? AuthenticatedLayout : PublicLayout;
-const toast = props.canEdit ? useToast() : null;
+// Toast is available to public viewers too so upload validation errors surface
+// during share-link contributions. Confirm dialogs stay owner-only — public
+// viewers don't have destructive actions.
+const toast = useToast();
 const confirm = props.canEdit ? useConfirm() : null;
 
 const options = computed(() => typeOptions(props.types));
@@ -169,25 +172,29 @@ const ALLOWED = [
 ];
 const mediaInput = ref(null);
 
+// Upload routes come from the server so the same component handles owner and
+// public-share uploads — they hit different endpoints scoped to either the
+// user or the event's share token.
+const mediaUploadRoutes = computed(() => props.event.media_upload_routes ?? null);
+const canUploadMedia = computed(() => !!mediaUploadRoutes.value);
+
 const { uploads, addFiles } = useS3Upload({
-    routes: {
-        uploadUrl: route('media.upload-url'),
-        multipartCreate: route('media.multipart.create'),
-        multipartSign: route('media.multipart.sign'),
-        multipartComplete: route('media.multipart.complete'),
-        multipartAbort: route('media.multipart.abort'),
-        cleanup: route('media.cleanup'),
-    },
+    routes: mediaUploadRoutes.value ?? {},
     initBody: (file) => ({ filename: file.name, size: file.size, content_type: file.type }),
     validate: (file) => ALLOWED.includes(file.type) ? null : 'unsupported file type',
     finalize: (file, key) => new Promise((resolve, reject) => {
-        router.post(route('media.store'), {
+        const body = {
             s3_key: key,
             original_name: file.name,
             mime: file.type,
             size: file.size,
-            event_id: props.event.id,
-        }, { preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject });
+        };
+        // The owner endpoint needs event_id in the body (it's not in the URL);
+        // the share endpoint takes the event from its route binding instead.
+        if (props.canEdit) body.event_id = props.event.id;
+        router.post(mediaUploadRoutes.value.store, body, {
+            preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject,
+        });
     }),
     onUploaded: (file) => toast?.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 }),
     onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),
@@ -297,7 +304,7 @@ const openLightbox = (item) => { lightbox.value = item; };
 
 <template>
     <Head :title="event.name" />
-    <Toast v-if="canEdit" />
+    <Toast />
     <ConfirmDialog v-if="canEdit" />
     <SplitBeforeUploadDialog
         v-if="canEdit"
@@ -408,10 +415,10 @@ const openLightbox = (item) => { lightbox.value = item; };
                 <div class="section-head">
                     <h3>Photos &amp; videos <span v-if="media.length" class="count-badge">{{ media.length }}</span></h3>
                     <!-- Hidden file picker; the visible "Upload media" button lives below. -->
-                    <input v-if="canEdit" ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
+                    <input v-if="canUploadMedia" ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
                 </div>
 
-                <Card v-if="canEdit && uploads.length" class="uploads">
+                <Card v-if="canUploadMedia && uploads.length" class="uploads">
                     <template #content>
                         <div v-for="u in uploads" :key="u.name" class="upload-row">
                             <div class="upload-name"><i class="pi pi-cloud-upload" /> <span>{{ u.name }}</span> <Tag :value="u.status" /></div>
@@ -423,11 +430,11 @@ const openLightbox = (item) => { lightbox.value = item; };
                 <div v-if="!media.length" class="empty">
                     <i class="pi pi-images" />
                     <p>No photos or videos yet.</p>
-                    <Button v-if="canEdit" label="Upload media" icon="pi pi-upload" size="small" @click="pickMedia" />
+                    <Button v-if="canUploadMedia" label="Upload media" icon="pi pi-upload" size="small" @click="pickMedia" />
                 </div>
 
                 <div v-else>
-                    <div v-if="canEdit" class="card-actions">
+                    <div v-if="canUploadMedia" class="card-actions">
                         <Button icon="pi pi-upload" label="Upload media" size="small" outlined @click="pickMedia" />
                     </div>
                     <div class="media-grid">

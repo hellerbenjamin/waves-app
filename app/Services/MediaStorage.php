@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Event;
 use App\Models\EventInvite;
 use App\Models\Media;
 use App\Models\User;
@@ -55,6 +56,24 @@ class MediaStorage
             'contribute.upload-put',
             now()->addMinutes(15),
             ['invite' => $invite->token, 'key' => $key],
+        ));
+    }
+
+    /**
+     * Mint an upload target authorised by an event's public share token.
+     * Parallel to {@see contribUploadTarget}; the share viewer can upload
+     * into the event without minting a separate invite.
+     *
+     * @return array{url: string, headers: array<string, string>, s3_key: string}
+     */
+    public function eventShareUploadTarget(Event $event, string $contentType, string $extension): array
+    {
+        $key = $this->newContribKey($event->id, $extension);
+
+        return $this->signedPut($key, $contentType, fn () => URL::temporarySignedRoute(
+            'events.shared.media-upload-put',
+            now()->addMinutes(15),
+            ['event' => $event->share_token, 'key' => $key],
         ));
     }
 

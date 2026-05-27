@@ -35,6 +35,7 @@ class EventPresenter
             'location' => $event->location,
             'description' => $event->description,
             'share_url' => $ctx->eventShareUrl,
+            'media_upload_routes' => $ctx->mediaUploadRoutes,
             'tracks' => $event->tracks->map(fn (Track $t) => $this->trackCard($t, $ctx))->all(),
             'media' => $event->media->map(fn (Media $m) => $this->mediaCard($m, $ctx))->all(),
             // Contribution links are an owner-only concern; never on a public view.

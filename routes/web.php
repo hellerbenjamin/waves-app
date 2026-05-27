@@ -3,6 +3,7 @@
 use App\Http\Controllers\ChannelTemplateController;
 use App\Http\Controllers\ContributionController;
 use App\Http\Controllers\EventController;
+use App\Http\Controllers\EventShareUploadController;
 use App\Http\Controllers\MediaController;
 use App\Http\Controllers\ProfileController;
 use App\Http\Controllers\PublicProfileController;
@@ -25,6 +26,18 @@ Route::get('/events/share/{event:share_token}/tracks/{track}/peaks', [EventContr
 Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
 Route::get('/events/share/{event:share_token}/media/{media}/download', [EventController::class, 'downloadSharedMedia'])->name('events.shared.media-download');
+
+// Anyone with the public event-share link can also upload photos/videos into
+// the event. Token-bound (no auth); mirrors the contribute flow but without a
+// separate invite — the share is the access control.
+Route::post('/events/share/{event:share_token}/media/upload-url', [EventShareUploadController::class, 'uploadUrl'])->name('events.shared.media-upload-url');
+Route::put('/events/share/{event:share_token}/media/upload', [EventShareUploadController::class, 'uploadPut'])->middleware('signed')->name('events.shared.media-upload-put');
+Route::post('/events/share/{event:share_token}/media/multipart', [EventShareUploadController::class, 'createMultipart'])->name('events.shared.media-multipart-create');
+Route::get('/events/share/{event:share_token}/media/multipart/sign', [EventShareUploadController::class, 'signPart'])->name('events.shared.media-multipart-sign');
+Route::post('/events/share/{event:share_token}/media/multipart/complete', [EventShareUploadController::class, 'completeMultipart'])->name('events.shared.media-multipart-complete');
+Route::post('/events/share/{event:share_token}/media/multipart/abort', [EventShareUploadController::class, 'abortMultipart'])->name('events.shared.media-multipart-abort');
+Route::post('/events/share/{event:share_token}/media/cleanup', [EventShareUploadController::class, 'cleanup'])->name('events.shared.media-cleanup');
+Route::post('/events/share/{event:share_token}/media', [EventShareUploadController::class, 'store'])->name('events.shared.media-store');
 
 // A shared profile reaches all of a user's events (and their tracks/media)
 // through the single profile token, so events don't each need their own link.
