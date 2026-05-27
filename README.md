@@ -38,6 +38,19 @@ ddev vite        # wraps `npm run dev` inside the web container; Ctrl-C to stop
 It serves assets over TLS at `https://waves.ddev.site:5173` (writes
 `public/hot`). Edits to Vue/JS hot-reload live in the browser.
 
+#### Splitting only works against a production build
+
+The in-browser splitting flows (long-WAV split-before-upload, and the multi-file
+"Stitch & split" recording flow) construct Web Workers to scan PCM in the
+background. Workers are subject to the browser's same-origin policy and refuse
+to load a script served from a different origin than the page. In dev, the page
+is on `https://waves.ddev.site` (port 443) while Vite serves worker scripts
+from `https://waves.ddev.site:5173`, so the Worker constructor throws
+`SecurityError`. Production is unaffected: `npm run build` emits workers as
+bundled files that Laravel serves from the app's own origin via the Vite
+manifest. To exercise the splitting flows locally, build the assets once
+(`ddev npm run build`) and stop the dev server while testing.
+
 ### Background jobs
 
 Waveform extraction and image thumbnails run on the queue, so a worker must be
