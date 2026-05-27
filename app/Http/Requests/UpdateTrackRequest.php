@@ -27,6 +27,7 @@ class UpdateTrackRequest extends FormRequest
             'default_mix.*.level' => ['required_with:default_mix.*', 'numeric', 'between:0,100'],
             'default_mix.*.pan' => ['required_with:default_mix.*', 'numeric', 'between:-100,100'],
             'default_mix.*.muted' => ['required_with:default_mix.*', 'boolean'],
+            'default_mix.*.solo' => ['sometimes', 'boolean'],
             // null moves the track out of any event; an id must be an event the
             // user owns.
             'event_id' => ['sometimes', 'nullable', 'integer', Rule::exists('events', 'id')->where('user_id', $this->user()->id)],

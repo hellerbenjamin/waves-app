@@ -35,10 +35,12 @@ const loadError = ref(null);
 const trackName = ref(props.track.name);
 
 // Per-channel mixer state. `levels` is 0–100 (%), `pans` is -100 (L) to 100 (R),
-// `muted` toggles each channel, `labels` are user-supplied channel names.
+// `muted` toggles each channel, `soloed` solos channels (when any channel is
+// soloed, non-soloed channels are silenced), `labels` are user-supplied names.
 const levels = ref([]);
 const pans = ref([]);
 const muted = ref([]);
+const soloed = ref([]);
 const labels = ref([]);
 const mixerUnavailable = ref(false);
 
@@ -136,12 +138,15 @@ const setupMixer = (audioEl, channels, corsOk) => {
         levels.value = Array.from({ length: channels }, (_, i) => saved?.[i]?.level ?? 100);
         pans.value = Array.from({ length: channels }, (_, i) => saved?.[i]?.pan ?? 0);
         muted.value = Array.from({ length: channels }, (_, i) => !!saved?.[i]?.muted);
+        soloed.value = Array.from({ length: channels }, (_, i) => !!saved?.[i]?.solo);
         labels.value = Array.from({ length: channels }, (_, i) => props.track.channel_labels?.[i] ?? '');
 
         // Push the seeded state into the audio graph directly (instantaneous,
         // pre-playback) so the first playback already reflects the saved mix.
+        const anySolo = soloed.value.some(Boolean);
         for (let i = 0; i < channels; i++) {
-            gainNodes[i].gain.value = muted.value[i] ? 0 : levels.value[i] / 100;
+            const audible = (!anySolo || soloed.value[i]) && !muted.value[i];
+            gainNodes[i].gain.value = audible ? levels.value[i] / 100 : 0;
             panners[i].pan.value = pans.value[i] / 100;
         }
     } catch (e) {
@@ -151,16 +156,34 @@ const setupMixer = (audioEl, channels, corsOk) => {
     }
 };
 
+// A channel plays when (no channel is soloed OR this channel is soloed) AND it
+// isn't muted. Solo overrides other channels' levels, not this channel's mute.
+const channelAudible = (i) => {
+    const anySolo = soloed.value.some(Boolean);
+    return (!anySolo || soloed.value[i]) && !muted.value[i];
+};
+
 const applyGain = (i) => {
     const node = gainNodes[i];
     if (!node || !audioCtx) return;
-    const value = muted.value[i] ? 0 : levels.value[i] / 100;
+    const value = channelAudible(i) ? levels.value[i] / 100 : 0;
     node.gain.setTargetAtTime(value, audioCtx.currentTime, 0.015);
+};
+
+// Flipping any channel's solo changes which other channels are audible, so
+// re-apply gain on the whole strip.
+const applyAllGains = () => {
+    for (let i = 0; i < gainNodes.length; i++) applyGain(i);
 };
 
 const toggleMute = (i) => {
     muted.value[i] = !muted.value[i];
     applyGain(i);
+};
+
+const toggleSolo = (i) => {
+    soloed.value[i] = !soloed.value[i];
+    applyAllGains();
 };
 
 const applyPan = (i) => {
@@ -239,6 +262,7 @@ const saveDefaultMix = async () => {
             level: lvl,
             pan: pans.value[i] ?? 0,
             muted: !!muted.value[i],
+            solo: !!soloed.value[i],
         }));
         const res = await apiFetch(route('tracks.update', props.track.id), {
             method: 'PATCH',
@@ -272,9 +296,10 @@ const applyMixSource = (source) => {
         levels.value[i] = entry.level ?? 100;
         pans.value[i] = entry.pan ?? 0;
         muted.value[i] = !!entry.muted;
-        applyGain(i);
+        soloed.value[i] = !!entry.solo;
         applyPan(i);
     }
+    applyAllGains();
     selectedMixSource.value = null; // snap the picker back to the placeholder
 };
 
@@ -743,6 +768,7 @@ onBeforeUnmount(() => {
     gainNodes = [];
     panners = [];
     pans.value = [];
+    soloed.value = [];
     labels.value = [];
     labelInputs = [];
 });
@@ -895,7 +921,12 @@ onBeforeUnmount(() => {
                 <template #content>
                     <p v-if="canEdit" class="mixer-hint">Click a channel name to rename it</p>
                     <div class="mixer">
-                        <div v-for="(lvl, i) in levels" :key="i" class="fader" :class="{ muted: muted[i] }">
+                        <div
+                            v-for="(lvl, i) in levels"
+                            :key="i"
+                            class="fader"
+                            :class="{ muted: muted[i], silenced: soloed.some(Boolean) && !soloed[i] && !muted[i] }"
+                        >
                             <span class="fader-val">{{ muted[i] ? '—' : `${lvl}%` }}</span>
                             <Slider
                                 v-model="levels[i]"
@@ -906,15 +937,29 @@ onBeforeUnmount(() => {
                                 class="fader-slider"
                                 @update:model-value="applyGain(i)"
                             />
-                            <Button
-                                :icon="muted[i] ? 'pi pi-volume-off' : 'pi pi-volume-up'"
-                                :severity="muted[i] ? 'danger' : 'secondary'"
-                                text
-                                rounded
-                                size="small"
-                                :aria-label="`Mute ${channelLabel(i, levels.length)}`"
-                                @click="toggleMute(i)"
-                            />
+                            <div class="fader-buttons">
+                                <Button
+                                    :icon="muted[i] ? 'pi pi-volume-off' : 'pi pi-volume-up'"
+                                    :severity="muted[i] ? 'danger' : 'secondary'"
+                                    text
+                                    rounded
+                                    size="small"
+                                    :aria-label="`Mute ${channelLabel(i, levels.length)}`"
+                                    @click="toggleMute(i)"
+                                />
+                                <Button
+                                    label="S"
+                                    :severity="soloed[i] ? 'warn' : 'secondary'"
+                                    :outlined="soloed[i]"
+                                    text
+                                    rounded
+                                    size="small"
+                                    class="solo-btn"
+                                    :aria-label="`Solo ${channelLabel(i, levels.length)}`"
+                                    :aria-pressed="soloed[i]"
+                                    @click="toggleSolo(i)"
+                                />
+                            </div>
                             <div v-if="canEdit" class="label-field">
                                 <input
                                     :ref="(el) => setLabelRef(el, i)"
@@ -1178,6 +1223,9 @@ onBeforeUnmount(() => {
 .mixer { display: flex; flex-wrap: wrap; gap: 1.25rem; padding-top: 0.25rem; }
 .fader { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 4.75rem; }
 .fader.muted { opacity: 0.65; }
+.fader.silenced { opacity: 0.45; }
+.fader-buttons { display: flex; align-items: center; gap: 0.125rem; }
+.solo-btn { font-weight: 700; font-size: 0.75rem; min-width: 1.75rem; }
 .fader-val { font-size: 0.8125rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
 .fader-slider { height: 150px; }
 .label-field { position: relative; width: 100%; }

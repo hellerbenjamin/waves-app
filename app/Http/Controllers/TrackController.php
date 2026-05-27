@@ -139,6 +139,7 @@ class TrackController extends Controller
                     'level' => (int) round(max(0, min(100, (float) $entry['level']))),
                     'pan' => (int) round(max(-100, min(100, (float) $entry['pan']))),
                     'muted' => (bool) $entry['muted'],
+                    'solo' => (bool) ($entry['solo'] ?? false),
                 ])
                 ->all();
         }
