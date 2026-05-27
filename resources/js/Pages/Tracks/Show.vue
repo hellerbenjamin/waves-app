@@ -1,5 +1,5 @@
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { Head, Link, router } from '@inertiajs/vue3';
 import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout.vue';
 import PublicLayout from '@/Layouts/PublicLayout.vue';
@@ -8,9 +8,9 @@ import Tag from 'primevue/tag';
 import Card from 'primevue/card';
 import Message from 'primevue/message';
 import Slider from 'primevue/slider';
-import Select from 'primevue/select';
 import Dialog from 'primevue/dialog';
 import InputText from 'primevue/inputtext';
+import Menu from 'primevue/menu';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 
@@ -27,8 +27,18 @@ const Layout = props.canEdit ? AuthenticatedLayout : PublicLayout;
 const waveformEl = ref(null);
 const isPlaying = ref(false);
 const isReady = ref(false);
+const audioReady = ref(false); // <audio> element has buffered enough to play
 const currentTime = ref(0);
 const loadError = ref(null);
+
+// Floating mini-transport shows when the main controls scroll out of view.
+const controlsEl = ref(null);
+const showMiniTransport = ref(false);
+
+// Peak meter levels per channel (0–1, smoothed for fall-off).
+const meterLevels = ref([]);
+let analysers = [];
+let meterRafId = null;
 
 // Local source of truth for the (editable) track name so the heading and the
 // document title update immediately on rename, without a full Inertia reload.
@@ -46,12 +56,12 @@ const mixerUnavailable = ref(false);
 
 // Saved channel-name templates the user can apply to this (or any) track.
 const templateList = ref([...props.templates]);
-const selectedTemplate = ref(null);
 const showSaveDialog = ref(false);
 const newTemplateName = ref('');
 
 let ws = null;
 let audioCtx = null;
+let audioEl = null;
 let gainNodes = [];
 let panners = [];
 let pollTimer = null;
@@ -122,13 +132,23 @@ const setupMixer = (audioEl, channels, corsOk) => {
             const panner = audioCtx.createStereoPanner();
             panner.pan.value = 0; // centered for now; per-channel pan comes later
 
+            // Post-fader peak meter tap. Small FFT — we only need time-domain
+            // peak, not a spectrum, so 256 samples is plenty and cheap.
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0;
+
             splitter.connect(gain, i, 0);
             gain.connect(panner);
+            gain.connect(analyser);
             panner.connect(audioCtx.destination);
 
             gainNodes.push(gain);
             panners.push(panner);
+            analysers.push(analyser);
         }
+
+        meterLevels.value = Array.from({ length: channels }, () => 0);
 
         // Seed from a saved default mix when present (the owner's saved
         // levels/pans/mutes are persisted on the track and apply to shared
@@ -184,6 +204,45 @@ const toggleMute = (i) => {
 const toggleSolo = (i) => {
     soloed.value[i] = !soloed.value[i];
     applyAllGains();
+};
+
+// Sample peak per channel and fall off ~6× per second. Reading time-domain
+// data is essentially free; the cost is the rAF loop, which we only run while
+// the track is playing.
+const meterBuffers = [];
+const startMeters = () => {
+    if (meterRafId || !analysers.length) return;
+    while (meterBuffers.length < analysers.length) {
+        meterBuffers.push(new Float32Array(analysers[meterBuffers.length].fftSize));
+    }
+    const tick = () => {
+        const next = meterLevels.value.slice();
+        for (let i = 0; i < analysers.length; i++) {
+            analysers[i].getFloatTimeDomainData(meterBuffers[i]);
+            let peak = 0;
+            const buf = meterBuffers[i];
+            for (let j = 0; j < buf.length; j++) {
+                const a = Math.abs(buf[j]);
+                if (a > peak) peak = a;
+            }
+            const prev = next[i] ?? 0;
+            // Fast attack, slow release for VU-meter feel.
+            next[i] = peak > prev ? peak : prev * 0.88;
+            if (next[i] < 0.0005) next[i] = 0;
+        }
+        meterLevels.value = next;
+        meterRafId = requestAnimationFrame(tick);
+    };
+    meterRafId = requestAnimationFrame(tick);
+};
+
+const stopMeters = () => {
+    if (meterRafId) cancelAnimationFrame(meterRafId);
+    meterRafId = null;
+    // Let the bars fall to zero so they don't freeze at their last value.
+    if (meterLevels.value.length) {
+        meterLevels.value = meterLevels.value.map(() => 0);
+    }
 };
 
 const applyPan = (i) => {
@@ -282,13 +341,19 @@ const saveDefaultMix = async () => {
 // the live faders so they can audition (and tweak) before hitting Save default
 // mix themselves. Mirrors how applyTemplate copies labels into the live row.
 const mixSourceList = ref([...props.mixSources]);
-const selectedMixSource = ref(null);
+
+const showCopyMixDialog = ref(false);
+const selectedCopyMixId = ref(null);
+
+const confirmCopyMix = () => {
+    const source = mixSourceList.value.find((s) => s.id === selectedCopyMixId.value);
+    if (source) applyMixSource(source);
+    showCopyMixDialog.value = false;
+    selectedCopyMixId.value = null;
+};
 
 const applyMixSource = (source) => {
-    if (!source?.default_mix) {
-        selectedMixSource.value = null;
-        return;
-    }
+    if (!source?.default_mix) return;
     const channels = channelCount();
     for (let i = 0; i < channels; i++) {
         const entry = source.default_mix[i];
@@ -300,7 +365,6 @@ const applyMixSource = (source) => {
         applyPan(i);
     }
     applyAllGains();
-    selectedMixSource.value = null; // snap the picker back to the placeholder
 };
 
 const clearDefaultMix = async () => {
@@ -344,9 +408,53 @@ const saveName = async () => {
 const applyTemplate = (template) => {
     if (!template) return;
     labels.value = labels.value.map((_, i) => template.labels?.[i] ?? '');
-    selectedTemplate.value = null; // leave the picker on its placeholder
     saveLabels();
 };
+
+const templatesMenu = ref(null);
+const defaultMixMenu = ref(null);
+
+const templatesMenuItems = computed(() => {
+    const items = templateList.value.map((t) => ({
+        label: t.name,
+        template: t,
+        command: () => applyTemplate(t),
+    }));
+    if (items.length) items.push({ separator: true });
+    items.push({
+        label: 'Save current as template…',
+        icon: 'pi pi-bookmark',
+        command: openSaveTemplate,
+    });
+    return items;
+});
+
+const defaultMixMenuItems = computed(() => {
+    const items = [{
+        label: hasDefaultMix.value ? 'Update default mix' : 'Save default mix',
+        icon: 'pi pi-save',
+        command: saveDefaultMix,
+    }];
+    if (hasDefaultMix.value) {
+        items.push({
+            label: 'Clear default mix',
+            icon: 'pi pi-times',
+            command: clearDefaultMix,
+        });
+    }
+    if (mixSourceList.value.length) {
+        items.push({ separator: true });
+        items.push({
+            label: 'Copy mix from another track…',
+            icon: 'pi pi-copy',
+            command: () => {
+                selectedCopyMixId.value = mixSourceList.value[0]?.id ?? null;
+                showCopyMixDialog.value = true;
+            },
+        });
+    }
+    return items;
+});
 
 const openSaveTemplate = () => {
     newTemplateName.value = (props.track.name || '').replace(/\.[^.]+$/, '');
@@ -489,7 +597,10 @@ const initWaveform = async () => {
         peaks: peaksChannels.value ?? undefined,
         duration: props.track.duration_seconds ?? undefined,
         splitChannels: channels > 1 ? Array.from({ length: channels }, () => ({})) : undefined,
-        height: channels > 1 ? 64 : 140,
+        // Cap total waveform height around ~440px so 16-channel tracks don't
+        // push the mixer below the fold. Per-channel height floors at 22px so
+        // bars stay visible; mono/stereo keep a tall single waveform.
+        height: channels > 1 ? Math.max(22, Math.min(64, Math.floor(440 / channels))) : 140,
         waveColor: cssVar('--p-primary-200', '#c7d2fe'),
         progressColor: cssVar('--p-primary-color', '#6366f1'),
         cursorColor: cssVar('--p-text-color', '#1f2937'),
@@ -507,10 +618,17 @@ const initWaveform = async () => {
 
     setupMixer(audio, channels, corsOk);
 
+    audioEl = audio;
+    audio.addEventListener('canplay', () => { audioReady.value = true; });
+
     ws.on('ready', () => { isReady.value = true; });
-    ws.on('play', () => { isPlaying.value = true; audioCtx?.resume(); });
-    ws.on('pause', () => { isPlaying.value = false; });
-    ws.on('finish', () => { isPlaying.value = false; });
+    ws.on('play', () => {
+        isPlaying.value = true;
+        audioCtx?.resume();
+        startMeters();
+    });
+    ws.on('pause', () => { isPlaying.value = false; stopMeters(); });
+    ws.on('finish', () => { isPlaying.value = false; stopMeters(); });
     ws.on('timeupdate', (t) => { currentTime.value = t; });
     ws.on('error', (e) => { loadError.value = e?.message || String(e); });
     ws.on('ready', () => {
@@ -518,7 +636,18 @@ const initWaveform = async () => {
         enableRegionCreate(proposal.value?.status === 'ready');
         // Keep the detection-poll alive if the page loaded mid-detection.
         if (proposal.value?.status === 'detecting') startDetectPolling();
+        observeControlsVisibility();
     });
+};
+
+// Show a floating play/time bar when the main controls scroll off-screen.
+let controlsObserver = null;
+const observeControlsVisibility = () => {
+    if (controlsObserver || !controlsEl.value || typeof IntersectionObserver === 'undefined') return;
+    controlsObserver = new IntersectionObserver(([entry]) => {
+        showMiniTransport.value = !entry.isIntersecting;
+    }, { threshold: 0 });
+    controlsObserver.observe(controlsEl.value);
 };
 
 // Split-into-songs UI state. `proposal` mirrors the server's split_proposal:
@@ -732,7 +861,58 @@ const restart = () => {
     ws?.play();
 };
 
+const seekBy = (delta) => {
+    if (!ws) return;
+    const duration = ws.getDuration() || props.track.duration_seconds || 0;
+    if (!duration) return;
+    const next = Math.max(0, Math.min(duration, (ws.getCurrentTime() || 0) + delta));
+    ws.seekTo(next / duration);
+};
+
+// Space/J/K/L/←/→/Home for transport; ignored while typing in inputs so the
+// channel-label and region-name fields keep their normal keys.
+const onKeyDown = (e) => {
+    const target = e.target;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    switch (e.key) {
+        case ' ':
+            e.preventDefault();
+            togglePlay();
+            break;
+        case 'ArrowLeft':
+            e.preventDefault();
+            seekBy(e.shiftKey ? -30 : -5);
+            break;
+        case 'ArrowRight':
+            e.preventDefault();
+            seekBy(e.shiftKey ? 30 : 5);
+            break;
+        case 'j':
+        case 'J':
+            e.preventDefault();
+            seekBy(-10);
+            break;
+        case 'l':
+        case 'L':
+            e.preventDefault();
+            seekBy(10);
+            break;
+        case 'k':
+        case 'K':
+            e.preventDefault();
+            togglePlay();
+            break;
+        case 'Home':
+            e.preventDefault();
+            restart();
+            break;
+    }
+};
+
 onMounted(() => {
+    window.addEventListener('keydown', onKeyDown);
     if (props.track.peaks_ready) {
         nextTick(initWaveform);
     } else {
@@ -753,6 +933,10 @@ watch(() => props.track.peaks_ready, (ready) => {
 });
 
 onBeforeUnmount(() => {
+    window.removeEventListener('keydown', onKeyDown);
+    stopMeters();
+    controlsObserver?.disconnect();
+    controlsObserver = null;
     clearInterval(pollTimer);
     clearInterval(detectPoll);
     clearTimeout(savedTimer);
@@ -763,12 +947,15 @@ onBeforeUnmount(() => {
     regions = null;
     ws?.destroy();
     ws = null;
+    audioEl = null;
     audioCtx?.close();
     audioCtx = null;
     gainNodes = [];
     panners = [];
+    analysers = [];
     pans.value = [];
     soloed.value = [];
+    meterLevels.value = [];
     labels.value = [];
     labelInputs = [];
 });
@@ -820,6 +1007,15 @@ onBeforeUnmount(() => {
         </template>
 
         <div class="stack">
+            <div class="meta-strip">
+                <Tag v-if="track.peaks_ready" severity="success" value="Ready" />
+                <Tag v-else severity="warn" value="Processing" />
+                <span class="meta-chip"><i class="pi pi-sliders-v" /> {{ channelCount() || '—' }} ch</span>
+                <span class="meta-chip"><i class="pi pi-clock" /> {{ formatTime(track.duration_seconds) }}</span>
+                <span class="meta-chip"><i class="pi pi-file" /> {{ formatBytes(track.size) }}</span>
+                <span v-if="track.mime" class="meta-chip">{{ track.mime }}</span>
+            </div>
+
             <Card>
                 <template #content>
                     <Message v-if="loadError" severity="error" :closable="false">
@@ -829,24 +1025,28 @@ onBeforeUnmount(() => {
                     <template v-if="track.peaks_ready">
                         <div ref="waveformEl" class="waveform" :class="{ 'is-loading': !isReady }" />
 
-                        <div class="controls">
+                        <div ref="controlsEl" class="controls">
                             <Button
                                 :icon="isPlaying ? 'pi pi-pause' : 'pi pi-play'"
                                 :label="isPlaying ? 'Pause' : 'Play'"
-                                :disabled="!isReady"
+                                :disabled="!isReady || !audioReady"
                                 @click="togglePlay"
                             />
                             <Button
                                 icon="pi pi-replay"
                                 text
                                 rounded
-                                :disabled="!isReady"
+                                :disabled="!isReady || !audioReady"
                                 aria-label="Restart"
                                 @click="restart"
                             />
+                            <span v-if="isReady && !audioReady" class="buffering">
+                                <i class="pi pi-spin pi-spinner" /> Buffering…
+                            </span>
                             <span class="time">
                                 {{ formatTime(currentTime) }} / {{ formatTime(track.duration_seconds) }}
                             </span>
+                            <span class="shortcut-hint" aria-hidden="true">Space ⏯ · ← → seek · J/L ±10s</span>
                         </div>
                     </template>
 
@@ -869,57 +1069,52 @@ onBeforeUnmount(() => {
                                 <template v-if="labelsStatus === 'saving' || mixStatus === 'saving'">Saving…</template>
                                 <template v-else-if="labelsStatus === 'saved' || mixStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
                             </span>
-                            <Select
-                                v-if="templateList.length"
-                                v-model="selectedTemplate"
-                                :options="templateList"
-                                option-label="name"
-                                placeholder="Apply template"
-                                class="template-select"
-                                @update:model-value="applyTemplate"
-                            >
-                                <template #option="{ option }">
-                                    <div class="template-option">
-                                        <span>{{ option.name }}</span>
-                                        <i
-                                            class="pi pi-trash template-option-del"
-                                            :aria-label="`Delete template ${option.name}`"
-                                            @click.stop.prevent="deleteTemplate(option)"
-                                        />
-                                    </div>
-                                </template>
-                            </Select>
-                            <Button label="Save as template" icon="pi pi-bookmark" size="small" outlined @click="openSaveTemplate" />
-                            <Select
-                                v-if="mixSourceList.length"
-                                v-model="selectedMixSource"
-                                :options="mixSourceList"
-                                option-label="name"
-                                placeholder="Copy mix from…"
-                                class="template-select"
-                                @update:model-value="applyMixSource"
-                            />
+                            <Tag v-if="hasDefaultMix" value="Default mix saved" severity="success" class="mix-tag" />
                             <Button
-                                :label="hasDefaultMix ? 'Update default mix' : 'Save default mix'"
+                                label="Channel names"
+                                icon="pi pi-tag"
+                                size="small"
+                                outlined
+                                aria-haspopup="true"
+                                aria-controls="templates-menu"
+                                @click="templatesMenu.toggle($event)"
+                            />
+                            <Menu
+                                id="templates-menu"
+                                ref="templatesMenu"
+                                :model="templatesMenuItems"
+                                popup
+                            >
+                                <template #item="{ item, props: itemProps }">
+                                    <a v-if="item.template" v-bind="itemProps.action" class="menu-template-row">
+                                        <span class="menu-template-name">{{ item.label }}</span>
+                                        <i
+                                            class="pi pi-trash menu-template-del"
+                                            :aria-label="`Delete template ${item.label}`"
+                                            @click.stop.prevent="deleteTemplate(item.template)"
+                                        />
+                                    </a>
+                                </template>
+                            </Menu>
+                            <Button
+                                label="Default mix"
                                 icon="pi pi-sliders-h"
                                 size="small"
                                 outlined
-                                @click="saveDefaultMix"
+                                aria-haspopup="true"
+                                aria-controls="defaultmix-menu"
+                                @click="defaultMixMenu.toggle($event)"
                             />
-                            <Button
-                                v-if="hasDefaultMix"
-                                label="Clear default"
-                                icon="pi pi-times"
-                                size="small"
-                                text
-                                severity="secondary"
-                                @click="clearDefaultMix"
+                            <Menu
+                                id="defaultmix-menu"
+                                ref="defaultMixMenu"
+                                :model="defaultMixMenuItems"
+                                popup
                             />
                         </div>
                     </div>
                 </template>
                 <template #content>
-                    <p v-if="canEdit" class="mixer-hint">Click a channel name to rename it</p>
                     <div class="mixer">
                         <div
                             v-for="(lvl, i) in levels"
@@ -927,38 +1122,38 @@ onBeforeUnmount(() => {
                             class="fader"
                             :class="{ muted: muted[i], silenced: soloed.some(Boolean) && !soloed[i] && !muted[i] }"
                         >
-                            <span class="fader-val">{{ muted[i] ? '—' : `${lvl}%` }}</span>
-                            <Slider
-                                v-model="levels[i]"
-                                orientation="vertical"
-                                :min="0"
-                                :max="100"
-                                :disabled="muted[i]"
-                                class="fader-slider"
-                                @update:model-value="applyGain(i)"
-                            />
-                            <div class="fader-buttons">
-                                <Button
-                                    :icon="muted[i] ? 'pi pi-volume-off' : 'pi pi-volume-up'"
-                                    :severity="muted[i] ? 'danger' : 'secondary'"
-                                    text
-                                    rounded
-                                    size="small"
-                                    :aria-label="`Mute ${channelLabel(i, levels.length)}`"
-                                    @click="toggleMute(i)"
+                            <span class="fader-val">{{ muted[i] ? 'muted' : `${lvl}%` }}</span>
+                            <div class="fader-stack">
+                                <div class="meter" :aria-hidden="true">
+                                    <div class="meter-fill" :style="{ height: ((meterLevels[i] || 0) * 100) + '%' }" />
+                                </div>
+                                <Slider
+                                    v-model="levels[i]"
+                                    orientation="vertical"
+                                    :min="0"
+                                    :max="100"
+                                    :disabled="muted[i]"
+                                    class="fader-slider"
+                                    @update:model-value="applyGain(i)"
                                 />
-                                <Button
-                                    label="S"
-                                    :severity="soloed[i] ? 'warn' : 'secondary'"
-                                    :outlined="soloed[i]"
-                                    text
-                                    rounded
-                                    size="small"
-                                    class="solo-btn"
+                            </div>
+                            <div class="ms-buttons">
+                                <button
+                                    type="button"
+                                    class="ms-btn ms-mute"
+                                    :class="{ active: muted[i] }"
+                                    :aria-label="`Mute ${channelLabel(i, levels.length)}`"
+                                    :aria-pressed="muted[i]"
+                                    @click="toggleMute(i)"
+                                >M</button>
+                                <button
+                                    type="button"
+                                    class="ms-btn ms-solo"
+                                    :class="{ active: soloed[i] }"
                                     :aria-label="`Solo ${channelLabel(i, levels.length)}`"
                                     :aria-pressed="soloed[i]"
                                     @click="toggleSolo(i)"
-                                />
+                                >S</button>
                             </div>
                             <div v-if="canEdit" class="label-field">
                                 <input
@@ -968,6 +1163,7 @@ onBeforeUnmount(() => {
                                     :placeholder="channelLabel(i, levels.length)"
                                     maxlength="60"
                                     :aria-label="`Label for ${channelLabel(i, levels.length)}`"
+                                    :title="`Rename ${channelLabel(i, levels.length)}`"
                                     @blur="saveLabels"
                                     @keyup.enter="$event.target.blur()"
                                     @keydown.tab="focusAdjacentLabel($event, i)"
@@ -975,18 +1171,20 @@ onBeforeUnmount(() => {
                             </div>
                             <span v-else class="fader-label">{{ labels[i] || channelLabel(i, levels.length) }}</span>
 
-                            <div class="pan">
-                                <Slider
-                                    v-model="pans[i]"
-                                    :min="-100"
-                                    :max="100"
-                                    class="pan-slider"
-                                    :aria-label="`Pan ${channelLabel(i, levels.length)}`"
-                                    @update:model-value="applyPan(i)"
-                                />
-                                <button type="button" class="pan-val" title="Double-click to center" @dblclick="resetPan(i)">
-                                    {{ panLabel(pans[i]) }}
-                                </button>
+                            <div class="pan" :title="`Pan ${channelLabel(i, levels.length)} — double-click to center`">
+                                <span class="pan-end">L</span>
+                                <div class="pan-track" @dblclick="resetPan(i)">
+                                    <Slider
+                                        v-model="pans[i]"
+                                        :min="-100"
+                                        :max="100"
+                                        class="pan-slider"
+                                        :aria-label="`Pan ${channelLabel(i, levels.length)}`"
+                                        @update:model-value="applyPan(i)"
+                                    />
+                                </div>
+                                <span class="pan-end">R</span>
+                                <span class="pan-val">{{ panLabel(pans[i]) }}</span>
                             </div>
                         </div>
                     </div>
@@ -1103,36 +1301,23 @@ onBeforeUnmount(() => {
                 </template>
             </Card>
 
-            <Card>
-                <template #content>
-                    <dl class="meta">
-                        <div class="meta-row">
-                            <dt>Status</dt>
-                            <dd>
-                                <Tag v-if="track.peaks_ready" severity="success" value="Ready" />
-                                <Tag v-else severity="warn" value="Processing" />
-                            </dd>
-                        </div>
-                        <div class="meta-row">
-                            <dt>Channels</dt>
-                            <dd>{{ channelCount() || '—' }}</dd>
-                        </div>
-                        <div class="meta-row">
-                            <dt>Duration</dt>
-                            <dd>{{ formatTime(track.duration_seconds) }}</dd>
-                        </div>
-                        <div class="meta-row">
-                            <dt>Size</dt>
-                            <dd>{{ formatBytes(track.size) }}</dd>
-                        </div>
-                        <div class="meta-row">
-                            <dt>Format</dt>
-                            <dd>{{ track.mime || '—' }}</dd>
-                        </div>
-                    </dl>
-                </template>
-            </Card>
         </div>
+
+        <Transition name="mini-fade">
+            <div v-if="showMiniTransport && track.peaks_ready" class="mini-transport" role="region" aria-label="Floating transport">
+                <Button
+                    :icon="isPlaying ? 'pi pi-pause' : 'pi pi-play'"
+                    rounded
+                    :disabled="!isReady || !audioReady"
+                    :aria-label="isPlaying ? 'Pause' : 'Play'"
+                    @click="togglePlay"
+                />
+                <span class="mini-time">
+                    {{ formatTime(currentTime) }} / {{ formatTime(track.duration_seconds) }}
+                </span>
+                <span class="mini-title">{{ trackName }}</span>
+            </div>
+        </Transition>
 
         <Dialog v-if="canEdit" v-model:visible="showSaveDialog" modal header="Save channel template" :style="{ width: '24rem' }">
             <div class="save-dialog">
@@ -1146,6 +1331,22 @@ onBeforeUnmount(() => {
             </template>
         </Dialog>
 
+        <Dialog v-if="canEdit" v-model:visible="showCopyMixDialog" modal header="Copy mix from another track" :style="{ width: '26rem' }">
+            <div class="copy-mix-dialog">
+                <p class="copy-mix-hint">Choose a track whose saved default mix you'd like to load onto these faders.</p>
+                <div class="copy-mix-list">
+                    <label v-for="src in mixSourceList" :key="src.id" class="copy-mix-row">
+                        <input type="radio" :value="src.id" v-model="selectedCopyMixId" />
+                        <span>{{ src.name }}</span>
+                    </label>
+                </div>
+            </div>
+            <template #footer>
+                <Button label="Cancel" text @click="showCopyMixDialog = false" />
+                <Button label="Apply" icon="pi pi-copy" :disabled="!selectedCopyMixId" @click="confirmCopyMix" />
+            </template>
+        </Dialog>
+
         <Dialog v-if="canEdit" v-model:visible="showShareDialog" modal header="Share this track" :style="{ width: '26rem' }">
             <div class="share-dialog">
                 <template v-if="shareUrl">
@@ -1154,6 +1355,9 @@ onBeforeUnmount(() => {
                         <InputText :model-value="shareUrl" readonly class="share-link" @focus="$event.target.select()" />
                         <Button :icon="copied ? 'pi pi-check' : 'pi pi-copy'" :label="copied ? 'Copied' : 'Copy'" @click="copyShareUrl" />
                     </div>
+                    <a :href="shareUrl" target="_blank" rel="noopener" class="share-open-link">
+                        <i class="pi pi-external-link" /> Open public page
+                    </a>
                 </template>
                 <p v-else class="share-dialog-hint">Create a public link to let anyone play this track without signing in.</p>
             </div>
@@ -1205,10 +1409,15 @@ onBeforeUnmount(() => {
 .mixer-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; }
 .mixer-title { font-size: 1rem; font-weight: 600; }
 .mixer-actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-.template-select { min-width: 12rem; }
-.template-option { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; width: 100%; }
-.template-option-del { color: var(--p-text-muted-color); padding: 0.25rem; border-radius: 4px; }
-.template-option-del:hover { color: var(--p-red-500); }
+.mix-tag { font-weight: 500; }
+.menu-template-row {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; width: 100%;
+    padding: 0.5rem 0.75rem; cursor: pointer; color: inherit; text-decoration: none;
+}
+.menu-template-row:hover { background: var(--p-content-hover-background, rgba(0,0,0,0.04)); }
+.menu-template-name { flex: 1; }
+.menu-template-del { color: var(--p-text-muted-color); padding: 0.25rem; border-radius: 4px; }
+.menu-template-del:hover { color: var(--p-red-500); }
 .save-dialog { display: flex; flex-direction: column; gap: 0.5rem; }
 .save-dialog label { font-size: 0.875rem; font-weight: 500; }
 .save-dialog .p-inputtext { width: 100%; }
@@ -1220,14 +1429,46 @@ onBeforeUnmount(() => {
 .share-link { flex: 1; font-family: var(--p-font-family-mono, monospace); font-size: 0.8125rem; }
 .mixer-status { font-size: 0.8125rem; color: var(--p-text-muted-color); opacity: 0; transition: opacity 0.2s; display: inline-flex; align-items: center; gap: 0.25rem; }
 .mixer-status.visible { opacity: 1; }
-.mixer { display: flex; flex-wrap: wrap; gap: 1.25rem; padding-top: 0.25rem; }
-.fader { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; width: 4.75rem; }
+.mixer { display: flex; flex-wrap: wrap; gap: 1rem; padding-top: 0.25rem; }
+.fader { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; width: 5rem; }
 .fader.muted { opacity: 0.65; }
 .fader.silenced { opacity: 0.45; }
-.fader-buttons { display: flex; align-items: center; gap: 0.125rem; }
-.solo-btn { font-weight: 700; font-size: 0.75rem; min-width: 1.75rem; }
-.fader-val { font-size: 0.8125rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
+.fader-val {
+    font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color);
+    height: 1rem; visibility: hidden;
+}
+.fader:hover .fader-val, .fader:focus-within .fader-val { visibility: visible; }
+.fader.muted .fader-val { visibility: visible; color: var(--p-red-500); }
+
+.fader-stack {
+    display: flex; align-items: stretch; justify-content: center; gap: 6px; height: 150px;
+}
+.meter {
+    width: 6px; position: relative; background: var(--p-content-border-color, #e5e7eb);
+    border-radius: 3px; overflow: hidden;
+}
+.meter-fill {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(to top, #22c55e 0%, #22c55e 70%, #eab308 85%, #ef4444 100%);
+    transition: height 60ms linear;
+}
 .fader-slider { height: 150px; }
+
+.ms-buttons { display: flex; gap: 0.25rem; }
+.ms-btn {
+    appearance: none; border: 1px solid var(--p-content-border-color); background: transparent;
+    width: 1.625rem; height: 1.625rem; border-radius: 6px; font-size: 0.75rem; font-weight: 700;
+    color: var(--p-text-muted-color); cursor: pointer; padding: 0;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+    font-variant-numeric: tabular-nums; line-height: 1;
+}
+.ms-btn:hover { color: var(--p-text-color); border-color: var(--p-primary-300, #a5b4fc); }
+.ms-btn.ms-mute.active {
+    background: var(--p-red-500, #ef4444); border-color: var(--p-red-500, #ef4444); color: white;
+}
+.ms-btn.ms-solo.active {
+    background: var(--p-yellow-500, #eab308); border-color: var(--p-yellow-500, #eab308); color: #1f2937;
+}
 .label-field { position: relative; width: 100%; }
 .fader-label-input {
     width: 100%;
@@ -1248,18 +1489,27 @@ onBeforeUnmount(() => {
     border-color: var(--p-primary-color);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--p-primary-color) 25%, transparent);
 }
-.mixer-hint {
-    display: flex;
-    align-items: center;
-    gap: 0.375rem;
-    margin: 0 0 1rem;
-    font-size: 0.8125rem;
-    color: var(--p-text-muted-color);
+.pan {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center;
+    gap: 0.25rem; width: 100%; margin-top: 0.125rem; position: relative;
 }
-.pan { display: flex; flex-direction: column; align-items: center; gap: 0.25rem; width: 100%; margin-top: 0.25rem; }
-.pan-slider { width: 100%; }
-.pan-val { background: none; border: none; padding: 0; cursor: pointer; font-size: 0.75rem; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); }
-.pan-val:hover { color: var(--p-text-color); }
+.pan-end { font-size: 0.625rem; color: var(--p-text-muted-color); font-weight: 600; line-height: 1; }
+.pan-track {
+    position: relative;
+}
+/* Center tick under the slider — purely visual reference for the resting position. */
+.pan-track::before {
+    content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 1px; height: 8px; background: var(--p-text-muted-color); opacity: 0.4; z-index: 0;
+    pointer-events: none;
+}
+.pan-slider { width: 100%; position: relative; z-index: 1; }
+.pan-val {
+    grid-column: 1 / -1; text-align: center; font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums; color: var(--p-text-muted-color);
+    height: 0.875rem; visibility: hidden;
+}
+.fader:hover .pan-val, .fader:focus-within .pan-val { visibility: visible; }
 
 .split-header { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 .split-title { font-size: 1rem; font-weight: 600; }
@@ -1292,8 +1542,65 @@ onBeforeUnmount(() => {
 .child-name:hover { color: var(--p-primary-color); }
 .child-time { font-size: 0.8125rem; color: var(--p-text-muted-color); font-variant-numeric: tabular-nums; }
 
-.meta { margin: 0; display: grid; gap: 0.875rem; }
-.meta-row { display: flex; justify-content: space-between; align-items: center; }
-.meta-row dt { color: var(--p-text-muted-color); font-size: 0.875rem; }
-.meta-row dd { margin: 0; font-weight: 500; }
+.meta-strip {
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    font-size: 0.8125rem; color: var(--p-text-muted-color);
+}
+.meta-chip {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    padding: 0.125rem 0.5rem; border-radius: 999px;
+    background: var(--p-content-background); border: 1px solid var(--p-content-border-color);
+    font-variant-numeric: tabular-nums;
+}
+.meta-chip .pi { font-size: 0.75rem; }
+
+.buffering {
+    font-size: 0.8125rem; color: var(--p-text-muted-color);
+    display: inline-flex; align-items: center; gap: 0.375rem;
+}
+.shortcut-hint {
+    font-size: 0.75rem; color: var(--p-text-muted-color); opacity: 0.75;
+    margin-left: 0.5rem;
+}
+
+.mini-transport {
+    position: fixed; left: 50%; bottom: 1rem; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 0.875rem;
+    background: var(--p-content-background); border: 1px solid var(--p-content-border-color);
+    border-radius: 999px; box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    z-index: 50; max-width: calc(100vw - 2rem);
+}
+.mini-time { font-size: 0.875rem; font-variant-numeric: tabular-nums; color: var(--p-text-color); }
+.mini-title {
+    font-size: 0.8125rem; color: var(--p-text-muted-color);
+    max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mini-fade-enter-active, .mini-fade-leave-active { transition: opacity 0.15s, transform 0.15s; }
+.mini-fade-enter-from, .mini-fade-leave-to { opacity: 0; transform: translate(-50%, 0.5rem); }
+
+.share-open-link {
+    display: inline-flex; align-items: center; gap: 0.375rem;
+    font-size: 0.8125rem; color: var(--p-primary-color); text-decoration: none;
+}
+.share-open-link:hover { text-decoration: underline; }
+
+.copy-mix-dialog { display: flex; flex-direction: column; gap: 0.75rem; }
+.copy-mix-hint { margin: 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
+.copy-mix-list { display: flex; flex-direction: column; gap: 0.25rem; max-height: 18rem; overflow: auto; }
+.copy-mix-row {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.625rem;
+    border-radius: 6px; cursor: pointer;
+}
+.copy-mix-row:hover { background: var(--p-content-hover-background, rgba(0,0,0,0.04)); }
+
+@media (max-width: 600px) {
+    .region-row {
+        grid-template-columns: 1.5rem 1fr auto;
+        grid-template-areas: "idx name del" "idx times del";
+        row-gap: 0.25rem;
+    }
+    .region-name { grid-area: name; }
+    .region-times { grid-area: times; }
+}
 </style>
