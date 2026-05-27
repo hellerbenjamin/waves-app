@@ -1441,11 +1441,14 @@ onBeforeUnmount(() => {
 .fader.muted .fader-val { visibility: visible; color: var(--p-red-500); }
 
 .fader-stack {
-    display: flex; align-items: stretch; justify-content: center; gap: 6px; height: 150px;
+    display: flex; align-items: stretch; justify-content: center; gap: 14px; height: 150px;
 }
 .meter {
-    width: 6px; position: relative; background: var(--p-content-border-color, #e5e7eb);
-    border-radius: 3px; overflow: hidden;
+    width: 8px; position: relative;
+    background: color-mix(in srgb, var(--p-content-border-color, #e5e7eb) 70%, transparent);
+    border: 1px solid var(--p-content-border-color, #e5e7eb);
+    border-radius: 4px; overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 .meter-fill {
     position: absolute; left: 0; right: 0; bottom: 0;
