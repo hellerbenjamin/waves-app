@@ -34,6 +34,30 @@ const loadError = ref(null);
 const controlsEl = ref(null);
 const showMiniTransport = ref(false);
 
+// Phones get a row-per-channel horizontal fader layout instead of the
+// hardware-mixer column-of-vertical-faders that doesn't fit a narrow viewport.
+const isNarrow = ref(false);
+let narrowMq = null;
+const onNarrowChange = (e) => { isNarrow.value = e.matches; };
+
+// Compact-by-default waveform; the user can expand it for fine work. Per-channel
+// height switches between the two presets and we push the new value into
+// wavesurfer live so the change doesn't require a reload.
+const waveformExpanded = ref(false);
+const waveformHeight = (channels, expanded) => {
+    if (expanded) {
+        // Big preset: tall single waveform for mono/stereo, multi-channel split
+        // capped around ~440px total with a 22px per-channel floor.
+        return channels > 1
+            ? Math.max(22, Math.min(64, Math.floor(440 / channels)))
+            : 140;
+    }
+    // Compact preset: roughly the height of two normal channel strips total.
+    return channels > 1
+        ? Math.max(10, Math.min(22, Math.floor(88 / channels)))
+        : 56;
+};
+
 // Peak meter levels per channel (0–1, smoothed for fall-off).
 const meterLevels = ref([]);
 let analysers = [];
@@ -592,10 +616,7 @@ const initWaveform = async () => {
         peaks: peaksChannels.value ?? undefined,
         duration: props.track.duration_seconds ?? undefined,
         splitChannels: channels > 1 ? Array.from({ length: channels }, () => ({})) : undefined,
-        // Cap total waveform height around ~440px so 16-channel tracks don't
-        // push the mixer below the fold. Per-channel height floors at 22px so
-        // bars stay visible; mono/stereo keep a tall single waveform.
-        height: channels > 1 ? Math.max(22, Math.min(64, Math.floor(440 / channels))) : 140,
+        height: waveformHeight(channels, waveformExpanded.value),
         waveColor: cssVar('--p-primary-200', '#c7d2fe'),
         progressColor: cssVar('--p-primary-color', '#6366f1'),
         cursorColor: cssVar('--p-text-color', '#1f2937'),
@@ -696,6 +717,9 @@ const onKeyDown = (e) => {
 
 onMounted(() => {
     window.addEventListener('keydown', onKeyDown);
+    narrowMq = window.matchMedia('(max-width: 640px)');
+    isNarrow.value = narrowMq.matches;
+    narrowMq.addEventListener('change', onNarrowChange);
     if (props.track.peaks_ready) {
         nextTick(initWaveform);
     } else {
@@ -704,6 +728,11 @@ onMounted(() => {
             router.reload({ only: ['track'], preserveScroll: true });
         }, 4000);
     }
+});
+
+watch(waveformExpanded, (expanded) => {
+    if (!ws) return;
+    ws.setOptions({ height: waveformHeight(channelCount(), expanded) });
 });
 
 // When polling refreshes the prop and peaks become ready, build the player.
@@ -717,6 +746,8 @@ watch(() => props.track.peaks_ready, (ready) => {
 
 onBeforeUnmount(() => {
     window.removeEventListener('keydown', onKeyDown);
+    narrowMq?.removeEventListener('change', onNarrowChange);
+    narrowMq = null;
     stopMeters();
     controlsObserver?.disconnect();
     controlsObserver = null;
@@ -824,6 +855,17 @@ onBeforeUnmount(() => {
                             <span class="time">
                                 {{ formatTime(currentTime) }} / {{ formatTime(track.duration_seconds) }}
                             </span>
+                            <Button
+                                :icon="waveformExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"
+                                :label="waveformExpanded ? 'Collapse' : 'Expand'"
+                                text
+                                size="small"
+                                severity="secondary"
+                                class="expand-toggle"
+                                :aria-label="waveformExpanded ? 'Collapse waveform' : 'Expand waveform'"
+                                :aria-pressed="waveformExpanded"
+                                @click="waveformExpanded = !waveformExpanded"
+                            />
                             <span class="shortcut-hint" aria-hidden="true">Space ⏯ · ← → seek · J/L ±10s</span>
                         </div>
                     </template>
@@ -898,22 +940,28 @@ onBeforeUnmount(() => {
                             v-for="(lvl, i) in levels"
                             :key="i"
                             class="fader"
-                            :class="{ muted: muted[i], silenced: soloed.some(Boolean) && !soloed[i] && !muted[i] }"
+                            :class="{
+                                muted: muted[i],
+                                silenced: soloed.some(Boolean) && !soloed[i] && !muted[i],
+                                'is-horizontal': isNarrow,
+                            }"
                         >
                             <span class="fader-val">{{ muted[i] ? 'muted' : `${lvl}%` }}</span>
                             <div class="fader-stack">
                                 <div class="meter" :aria-hidden="true">
                                     <div class="meter-fill" :style="{ height: ((meterLevels[i] || 0) * 100) + '%' }" />
                                 </div>
-                                <Slider
-                                    v-model="levels[i]"
-                                    orientation="vertical"
-                                    :min="0"
-                                    :max="100"
-                                    :disabled="muted[i]"
-                                    class="fader-slider"
-                                    @update:model-value="applyGain(i)"
-                                />
+                                <div class="fader-slot" :aria-hidden="true">
+                                    <Slider
+                                        v-model="levels[i]"
+                                        :orientation="isNarrow ? 'horizontal' : 'vertical'"
+                                        :min="0"
+                                        :max="100"
+                                        :disabled="muted[i]"
+                                        class="fader-slider"
+                                        @update:model-value="applyGain(i)"
+                                    />
+                                </div>
                             </div>
                             <div class="ms-buttons">
                                 <button
@@ -1070,8 +1118,14 @@ onBeforeUnmount(() => {
 .waveform { width: 100%; transition: opacity 0.2s; }
 .waveform.is-loading { opacity: 0.4; }
 
-.controls { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.25rem; }
-.time { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); font-size: 0.9375rem; }
+.controls { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.25rem; flex-wrap: wrap; }
+.time {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    color: var(--p-text-muted-color);
+    font-size: 0.9375rem;
+    white-space: nowrap;
+}
 
 .processing { display: flex; align-items: center; gap: 1rem; padding: 2rem 0.5rem; color: var(--p-text-muted-color); }
 .processing .pi-spinner { font-size: 1.75rem; }
@@ -1113,21 +1167,158 @@ onBeforeUnmount(() => {
 .fader.muted .fader-val { visibility: visible; color: var(--p-red-500); }
 
 .fader-stack {
-    display: flex; align-items: stretch; justify-content: center; gap: 14px; height: 150px;
+    display: flex; align-items: stretch; justify-content: center; gap: 12px; height: 160px;
 }
 .meter {
-    width: 8px; position: relative;
-    background: color-mix(in srgb, var(--p-content-border-color, #e5e7eb) 70%, transparent);
-    border: 1px solid var(--p-content-border-color, #e5e7eb);
-    border-radius: 4px; overflow: hidden;
-    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
+    width: 6px; position: relative;
+    background: #0b0f17;
+    border: 1px solid color-mix(in srgb, #000 35%, var(--p-content-border-color));
+    border-radius: 3px; overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45), inset 0 -1px 0 rgba(255, 255, 255, 0.04);
 }
 .meter-fill {
     position: absolute; left: 0; right: 0; bottom: 0;
-    background: linear-gradient(to top, #22c55e 0%, #22c55e 70%, #eab308 85%, #ef4444 100%);
+    /* Paint the gradient at the full meter height so the colors live at fixed
+       absolute positions (green low, yellow upper, red at the top). The fill's
+       own height clips it from the bottom, so a quiet signal stays green and
+       only loud peaks reach into yellow/red. */
+    background: linear-gradient(to top, #22c55e 0%, #22c55e 65%, #eab308 82%, #ef4444 100%);
+    background-size: 100% 160px;
+    background-position: left bottom;
+    background-repeat: no-repeat;
     transition: height 60ms linear;
 }
-.fader-slider { height: 150px; }
+
+/* Recessed fader slot with tick marks down each side, sized to give the cap
+   room without cropping at the travel ends. */
+.fader-slot {
+    position: relative;
+    width: 38px;
+    display: flex; justify-content: center;
+}
+/* The slot itself — a dark vertical groove behind the slider track. */
+.fader-slot::before {
+    content: '';
+    position: absolute; top: 10px; bottom: 10px;
+    left: 50%; transform: translateX(-50%);
+    width: 6px;
+    background: linear-gradient(to right, #0a0d13 0%, #1a1f2b 50%, #0a0d13 100%);
+    border-radius: 3px;
+    box-shadow:
+        inset 0 1px 2px rgba(0, 0, 0, 0.55),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+    pointer-events: none;
+    z-index: 0;
+}
+/* Tick marks flanking the slot, evenly spaced over the travel range. */
+.fader-slot::after {
+    content: '';
+    position: absolute; top: 10px; bottom: 10px;
+    left: 0; right: 0;
+    background-image:
+        repeating-linear-gradient(
+            to bottom,
+            var(--p-text-muted-color) 0 1px,
+            transparent 1px calc((100% - 1px) / 10)
+        ),
+        repeating-linear-gradient(
+            to bottom,
+            var(--p-text-muted-color) 0 1px,
+            transparent 1px calc((100% - 1px) / 10)
+        );
+    background-position: left center, right center;
+    background-size: 6px 100%, 6px 100%;
+    background-repeat: no-repeat;
+    opacity: 0.45;
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* Strip PrimeVue's default track look so our groove shows; keep the slider
+   itself functional and clickable across its full width. */
+.fader-slider {
+    height: 100%;
+    position: relative;
+    z-index: 1;
+}
+.fader-slider :deep(.p-slider) {
+    width: 14px !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+}
+.fader-slider :deep(.p-slider-range) {
+    /* Vertical slider: PrimeVue inline-sets height to value%; we only set the
+       thickness and horizontal centering. width is plain (no !important) so the
+       horizontal-mode inline width can win in the mobile rule. */
+    width: 6px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: linear-gradient(to top,
+        color-mix(in srgb, var(--p-primary-color) 55%, #000),
+        var(--p-primary-color)) !important;
+    border-radius: 3px;
+    box-shadow: 0 0 6px color-mix(in srgb, var(--p-primary-color) 40%, transparent);
+}
+/* The fader cap — rectangular, beveled, with a center indent line. */
+.fader-slider :deep(.p-slider-handle) {
+    width: 30px !important;
+    height: 18px !important;
+    /* No left override: PrimeVue sets `left: 50%` inline on the vertical
+       handle, and `left: <value%>` inline on the horizontal handle. An
+       !important rule here would beat the inline style and freeze the
+       horizontal cap at center. margin-left handles centering for both. */
+    margin-left: -15px !important;
+    border-radius: 3px !important;
+    background: linear-gradient(to bottom,
+        #fafbfc 0%,
+        #e4e7ec 45%,
+        #c5cad2 52%,
+        #e9ecf0 60%,
+        #b8bec7 100%) !important;
+    border: 1px solid #8a93a0 !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.85),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.18),
+        0 1px 2px rgba(0, 0, 0, 0.35),
+        0 3px 6px rgba(0, 0, 0, 0.2) !important;
+    transition: filter 0.12s, box-shadow 0.12s;
+}
+/* Colored indicator stripe across the cap — the visual "pointer" of the
+   fader's position, like the painted line on a hardware fader. */
+.fader-slider :deep(.p-slider-handle)::before {
+    content: '' !important;
+    position: absolute !important;
+    left: 0 !important;
+    right: 0 !important;
+    width: 100% !important;
+    top: 50% !important;
+    height: 4px !important;
+    background: linear-gradient(to bottom,
+        #b45309 0%,
+        #f59e0b 50%,
+        #fcd34d 100%) !important;
+    transform: translateY(-50%) !important;
+    border-radius: 1px !important;
+    box-shadow:
+        0 0 4px rgba(245, 158, 11, 0.6),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.25) !important;
+    pointer-events: none;
+}
+.fader-slider :deep(.p-slider-handle):hover,
+.fader-slider :deep(.p-slider-handle):focus {
+    filter: brightness(1.12);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.22),
+        inset 0 -1px 0 rgba(0, 0, 0, 0.6),
+        0 1px 2px rgba(0, 0, 0, 0.5),
+        0 4px 8px rgba(0, 0, 0, 0.35),
+        0 0 0 2px color-mix(in srgb, var(--p-primary-color) 35%, transparent) !important;
+    outline: none !important;
+}
+.fader.muted .fader-slider :deep(.p-slider-handle) {
+    filter: saturate(0.4) brightness(0.85);
+}
 
 .ms-buttons { display: flex; gap: 0.25rem; }
 .ms-btn {
@@ -1205,6 +1396,113 @@ onBeforeUnmount(() => {
 .shortcut-hint {
     font-size: 0.75rem; color: var(--p-text-muted-color); opacity: 0.75;
     margin-left: 0.5rem;
+    white-space: nowrap;
+}
+/* Keyboard hints are useless on touch — hide them so the controls row breathes. */
+@media (max-width: 640px) {
+    .shortcut-hint { display: none; }
+    .time { margin-left: 0; }
+    /* Collapse the expand toggle to its chevron so the row stays on one line. */
+    .expand-toggle :deep(.p-button-label) { display: none; }
+    .expand-toggle :deep(.p-button-icon) { margin: 0; }
+    /* Metadata chips (channels/duration/size/mime) are nice-to-have, not
+       essential — drop them on small screens to give the waveform room. */
+    .meta-strip { display: none; }
+
+    /* Horizontal per-channel fader rows. Vertical hardware-mixer faders work
+       well on desktop but crowd the narrow viewport; on mobile each channel
+       becomes a two-row block: a header row with label, value, and M/S, with
+       the full-width volume slider underneath where pan used to live. */
+    .mixer { flex-direction: column; flex-wrap: nowrap; gap: 0.75rem; }
+    .fader.is-horizontal {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.5rem 0.625rem;
+        width: 100%;
+        padding-bottom: 0.25rem;
+        border-bottom: 1px solid var(--p-content-border-color);
+    }
+    .fader.is-horizontal:last-child { border-bottom: none; padding-bottom: 0; }
+    .fader.is-horizontal .fader-val {
+        order: 2; margin-left: auto; min-width: 2.75rem; text-align: right; flex-shrink: 0;
+        height: auto; visibility: visible;
+    }
+    /* Slider drops to its own full-width sub-row — where the pan controls used
+       to render — so it has the whole channel width to travel across. */
+    .fader.is-horizontal .fader-stack {
+        order: 10; flex: 0 0 100%; height: auto; gap: 0.5rem; align-items: center;
+    }
+    /* Drop the vertical-only meter; live levels are still visible on the value
+       readout and on the waveform itself. */
+    .fader.is-horizontal .meter { display: none; }
+    .fader.is-horizontal .fader-slot {
+        width: auto; flex: 1; min-width: 0; height: 24px;
+    }
+    /* Horizontal groove + ticks: rotate the vertical slot decoration 90°. */
+    .fader.is-horizontal .fader-slot::before {
+        top: 50%; bottom: auto; left: 10px; right: 10px;
+        width: auto; height: 6px;
+        transform: translateY(-50%);
+        background: linear-gradient(to bottom, #0a0d13 0%, #1a1f2b 50%, #0a0d13 100%);
+    }
+    .fader.is-horizontal .fader-slot::after {
+        top: 0; bottom: 0; left: 10px; right: 10px;
+        background-image:
+            repeating-linear-gradient(
+                to right,
+                var(--p-text-muted-color) 0 1px,
+                transparent 1px calc((100% - 1px) / 10)
+            ),
+            repeating-linear-gradient(
+                to right,
+                var(--p-text-muted-color) 0 1px,
+                transparent 1px calc((100% - 1px) / 10)
+            );
+        background-position: center top, center bottom;
+        background-size: 100% 6px, 100% 6px;
+    }
+    .fader.is-horizontal .fader-slider { width: 100%; height: 100%; }
+    /* Reset the vertical base rule's `width: 14px` — for horizontal the slider
+       container must span the row so PrimeVue's inline `width: <value%>` on the
+       range fill is proportional to the slot, not a 14px stub. */
+    .fader.is-horizontal .fader-slider :deep(.p-slider) {
+        height: 14px !important; width: 100% !important;
+        min-width: 0 !important;
+    }
+    /* Hide the colored range fill on horizontal — the cap on its slot already
+       communicates position, and the fill kept misaligning with the cap. */
+    .fader.is-horizontal .fader-slider :deep(.p-slider-range) {
+        display: none !important;
+    }
+    /* Cap rotated 90° for horizontal travel — same look, sliding sideways.
+       margin-left centers the cap on PrimeVue's inline `left: <value%>`. */
+    .fader.is-horizontal .fader-slider :deep(.p-slider-handle) {
+        width: 18px !important; height: 30px !important;
+        margin-left: -9px !important; margin-top: -15px !important;
+        background: linear-gradient(to right,
+            #fafbfc 0%,
+            #e4e7ec 45%,
+            #c5cad2 52%,
+            #e9ecf0 60%,
+            #b8bec7 100%) !important;
+    }
+    .fader.is-horizontal .fader-slider :deep(.p-slider-handle)::before {
+        left: 50% !important; right: auto !important;
+        top: 0 !important; bottom: 0 !important;
+        width: 4px !important; height: auto !important;
+        transform: translateX(-50%) !important;
+        background: linear-gradient(to right,
+            #b45309 0%,
+            #f59e0b 50%,
+            #fcd34d 100%) !important;
+    }
+    .fader.is-horizontal .ms-buttons { order: 3; flex-shrink: 0; }
+    .fader.is-horizontal .label-field { order: 1; flex: 1; min-width: 0; }
+    .fader.is-horizontal .fader-label { order: 1; flex: 1; min-width: 0; }
+    /* Pan is rarely needed on a phone and crowds the row — drop it entirely.
+       Saved values are preserved server-side and reappear on a wider screen. */
+    .fader.is-horizontal .pan { display: none; }
 }
 
 .mini-transport {
