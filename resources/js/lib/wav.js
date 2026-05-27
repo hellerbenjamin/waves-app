@@ -185,3 +185,146 @@ export function buildSegmentBlob(file, header, { start, end }) {
 
     return new Blob([hdr, file.slice(startByte, endByte)], { type: 'audio/wav' });
 }
+
+/**
+ * @typedef {object} StitchedSource
+ * @property {File|Blob} file
+ * @property {WavHeader} header
+ * @property {number} startSeconds  inclusive start on the stitched timeline
+ * @property {number} endSeconds    exclusive end on the stitched timeline
+ */
+
+/**
+ * @typedef {object} Stitched
+ * @property {StitchedSource[]} sources              in user-chosen order
+ * @property {{ sampleRate:number, channels:number, bitsPerSample:number, bytesPerFrame:number }} format
+ * @property {number} totalDurationSeconds
+ */
+
+/**
+ * Read every file's WAV header and assemble a virtual stitched timeline. The
+ * mixer that produced these files split at 4 GB, so two adjacent chunks are
+ * format-identical by construction; we still validate, because a user can pick
+ * unrelated files. A mismatch throws with the offending filename — the caller
+ * surfaces that and asks them to fix the selection.
+ *
+ * @param {Array<File|Blob>} files  ordered as the user wants them stitched
+ * @returns {Promise<Stitched>}
+ */
+export async function readWavHeaders(files) {
+    if (!files?.length) throw new Error('No files provided.');
+
+    const sources = [];
+    let format = null;
+    let cursor = 0;
+
+    for (const file of files) {
+        const header = await readWavHeader(file);
+
+        const fmt = {
+            sampleRate: header.sampleRate,
+            channels: header.channels,
+            bitsPerSample: header.bitsPerSample,
+            bytesPerFrame: header.bytesPerFrame,
+        };
+
+        if (format === null) {
+            format = fmt;
+        } else if (
+            fmt.sampleRate !== format.sampleRate
+            || fmt.channels !== format.channels
+            || fmt.bitsPerSample !== format.bitsPerSample
+        ) {
+            const name = file.name || 'file';
+            throw new Error(
+                `"${name}" (${fmt.channels}ch @ ${fmt.sampleRate} Hz, ${fmt.bitsPerSample}-bit) doesn't match the first file `
+                + `(${format.channels}ch @ ${format.sampleRate} Hz, ${format.bitsPerSample}-bit). `
+                + `All files must share sample rate, channel count, and bit depth.`,
+            );
+        }
+
+        const startSeconds = cursor;
+        const endSeconds = cursor + header.durationSeconds;
+        sources.push({ file, header, startSeconds, endSeconds });
+        cursor = endSeconds;
+    }
+
+    return { sources, format, totalDurationSeconds: cursor };
+}
+
+/**
+ * Map a point on the stitched timeline to {sourceIndex, secondsWithinSource}.
+ * Out-of-range inputs clamp to the start/end of the stitched range — callers
+ * generally pass region edges derived from this same timeline, so clamping is
+ * the kindest behaviour.
+ */
+export function locateOnStitched(stitched, seconds) {
+    const { sources, totalDurationSeconds } = stitched;
+    if (seconds <= 0) return { sourceIndex: 0, secondsWithinSource: 0 };
+    if (seconds >= totalDurationSeconds) {
+        const last = sources.length - 1;
+        return { sourceIndex: last, secondsWithinSource: sources[last].header.durationSeconds };
+    }
+    // Linear scan is fine: N is small (handful of mixer chunks).
+    for (let i = 0; i < sources.length; i++) {
+        const s = sources[i];
+        if (seconds < s.endSeconds) {
+            return { sourceIndex: i, secondsWithinSource: seconds - s.startSeconds };
+        }
+    }
+    const last = sources.length - 1;
+    return { sourceIndex: last, secondsWithinSource: sources[last].header.durationSeconds };
+}
+
+/**
+ * Compose a Blob for a region `[start, end)` (in seconds) on the stitched
+ * timeline: a fresh PCM header followed by zero-copy `File.slice()` views
+ * across however many source files the region spans. No PCM bytes are read.
+ *
+ * Output is a standard 32-bit-size RIFF WAV; a single region above 4 GB would
+ * overflow it. Callers should reject that case upstream — songs are normally
+ * minutes long, so this is theoretical.
+ *
+ * @param {Stitched} stitched
+ * @param {{ start:number, end:number }} region  seconds on the stitched timeline
+ * @returns {Blob}
+ */
+export function buildStitchedSegmentBlob(stitched, { start, end }) {
+    if (end <= start) {
+        const hdr = buildWavHeader({ ...stitched.format, dataLength: 0 });
+        return new Blob([hdr], { type: 'audio/wav' });
+    }
+
+    const begin = locateOnStitched(stitched, start);
+    const finish = locateOnStitched(stitched, end);
+
+    const parts = [];
+    let dataLength = 0;
+
+    for (let i = begin.sourceIndex; i <= finish.sourceIndex; i++) {
+        const src = stitched.sources[i];
+        const sliceStart = (i === begin.sourceIndex) ? begin.secondsWithinSource : 0;
+        const sliceEnd = (i === finish.sourceIndex) ? finish.secondsWithinSource : src.header.durationSeconds;
+
+        const startByte = timeToByteOffset(src.header, sliceStart);
+        const endByte = timeToByteOffset(src.header, sliceEnd);
+        if (endByte > startByte) {
+            parts.push(src.file.slice(startByte, endByte));
+            dataLength += (endByte - startByte);
+        }
+    }
+
+    // Classic RIFF caps both the data and overall size fields at 4 GiB. We
+    // emit canonical 32-bit headers; refuse rather than silently wrap, which
+    // would produce a Blob whose header claims a truncated length.
+    const MAX_DATA_LENGTH = 0xffffffff - 36;
+    if (dataLength > MAX_DATA_LENGTH) {
+        throw new Error(
+            `Region exceeds the 4 GB limit for a single WAV file `
+            + `(${dataLength.toLocaleString()} bytes). Split it into smaller songs.`,
+        );
+    }
+
+    const hdr = buildWavHeader({ ...stitched.format, dataLength });
+    return new Blob([hdr, ...parts], { type: 'audio/wav' });
+}
