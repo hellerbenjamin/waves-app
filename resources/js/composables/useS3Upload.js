@@ -47,9 +47,12 @@ export function useS3Upload({ routes, initBody, finalize, validate, onUploaded, 
         .use(AwsS3, {
             // Below ~100 MB a single PUT is simpler and cheaper than multipart.
             shouldUseMultipart: (file) => file.size > 100 * 1024 * 1024,
-            // Keep part count under S3's 10,000 cap even at 50 GB, never below
-            // the 5 MB minimum part size.
-            getChunkSize: (file) => Math.max(5 * 1024 * 1024, Math.ceil(file.size / 9000)),
+            // Target ~25 MB parts so a 4 GB file is ~160 parts instead of ~820;
+            // scale up for very large files so we stay under S3's 10,000 cap.
+            getChunkSize: (file) => Math.max(25 * 1024 * 1024, Math.ceil(file.size / 9000)),
+            // Concurrent parts in flight. Default is 6; 10 better saturates a
+            // fast uplink when combined with the larger part size above.
+            limit: 10,
 
             async getUploadParameters(file) {
                 const res = await apiFetch(routes.uploadUrl, { method: 'POST', body: initBody(file) });
