@@ -68,6 +68,10 @@ class TrackController extends Controller
                 ->channelTemplates()
                 ->latest()
                 ->get(['id', 'name', 'labels']),
+            // Owner's other tracks with a saved default mix and a matching
+            // channel count — candidates to "Copy mix from". Filter on
+            // JSON_LENGTH so the huge peaks blob never leaves the DB.
+            'mixSources' => $this->mixSourcesFor($request, $track),
             'track' => array_merge(
                 $this->trackProps($track, route('tracks.stream', $track->id)),
                 ['share_url' => $track->share_token ? route('tracks.shared', $track->share_token) : null],
@@ -169,6 +173,36 @@ class TrackController extends Controller
     public function streamShared(Track $track): SymfonyResponse
     {
         return $this->storage->streamResponse($track);
+    }
+
+    /**
+     * Candidate source tracks for "Copy mix from…": owner's other tracks with
+     * a saved default_mix and the same channel count. Filter at the DB on
+     * JSON_LENGTH(peaks, '$.channels') so we never load the peaks payload.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function mixSourcesFor(Request $request, Track $track): array
+    {
+        $channels = count($track->peaks['channels'] ?? []);
+        if ($channels < 1) {
+            return [];
+        }
+
+        return $request->user()
+            ->tracks()
+            ->whereKeyNot($track->id)
+            ->whereNotNull('default_mix')
+            ->whereJsonLength('peaks->channels', $channels)
+            ->select(['id', 'original_name', 'default_mix'])
+            ->latest()
+            ->get()
+            ->map(fn (Track $t) => [
+                'id' => $t->id,
+                'name' => $t->original_name,
+                'default_mix' => $t->default_mix,
+            ])
+            ->all();
     }
 
     /**

@@ -17,6 +17,7 @@ import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 const props = defineProps({
     track: { type: Object, required: true },
     templates: { type: Array, default: () => [] },
+    mixSources: { type: Array, default: () => [] },
     canEdit: { type: Boolean, default: true },
 });
 
@@ -248,6 +249,30 @@ const saveDefaultMix = async () => {
     } catch (e) {
         mixStatus.value = '';
     }
+};
+
+// "Copy mix from…": load another of the user's tracks' saved default_mix into
+// the live faders so they can audition (and tweak) before hitting Save default
+// mix themselves. Mirrors how applyTemplate copies labels into the live row.
+const mixSourceList = ref([...props.mixSources]);
+const selectedMixSource = ref(null);
+
+const applyMixSource = (source) => {
+    if (!source?.default_mix) {
+        selectedMixSource.value = null;
+        return;
+    }
+    const channels = channelCount();
+    for (let i = 0; i < channels; i++) {
+        const entry = source.default_mix[i];
+        if (!entry) continue;
+        levels.value[i] = entry.level ?? 100;
+        pans.value[i] = entry.pan ?? 0;
+        muted.value[i] = !!entry.muted;
+        applyGain(i);
+        applyPan(i);
+    }
+    selectedMixSource.value = null; // snap the picker back to the placeholder
 };
 
 const clearDefaultMix = async () => {
@@ -814,6 +839,15 @@ onBeforeUnmount(() => {
                                 </template>
                             </Select>
                             <Button label="Save as template" icon="pi pi-bookmark" size="small" outlined @click="openSaveTemplate" />
+                            <Select
+                                v-if="mixSourceList.length"
+                                v-model="selectedMixSource"
+                                :options="mixSourceList"
+                                option-label="name"
+                                placeholder="Copy mix from…"
+                                class="template-select"
+                                @update:model-value="applyMixSource"
+                            />
                             <Button
                                 :label="hasDefaultMix ? 'Update default mix' : 'Save default mix'"
                                 icon="pi pi-sliders-h"
