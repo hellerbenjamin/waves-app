@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Track extends Model
 {
@@ -46,6 +47,15 @@ class Track extends Model
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class);
+    }
+
+    /**
+     * The track's audio, one row per source-channel mono Opus stream. Always
+     * iterate in `channel_index` order — the mixer UI labels by position.
+     */
+    public function channels(): HasMany
+    {
+        return $this->hasMany(TrackChannel::class)->orderBy('channel_index');
     }
 
     /** Cheap columns the track cards render from — never carries the peaks envelope (it lives in object storage). */
