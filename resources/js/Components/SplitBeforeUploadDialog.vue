@@ -233,6 +233,15 @@ const renderWaveform = () => {
     // route the audio).
     attachMultichannelGraph();
 
+    // The regions plugin positions regions as a fraction of getDuration(),
+    // which reads from the <audio> element and returns 0 while the Blob URL
+    // is still loading — so any region added before 'ready' renders piled at
+    // the start. Re-sync once the media is decoded so positions snap to the
+    // real duration. (Deleting a region after that point already worked
+    // because the deletion triggers the plugin to re-render against the
+    // now-correct duration.)
+    ws.on('ready', () => { syncRegionsToWaveform(); });
+
     ws.on('play', () => { isPlaying.value = true; });
     ws.on('pause', () => { isPlaying.value = false; });
     ws.on('finish', () => { isPlaying.value = false; });
