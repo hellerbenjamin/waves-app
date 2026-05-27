@@ -20,7 +20,9 @@ import { useConfirm } from 'primevue/useconfirm';
 import { typeLabel, typeOptions } from '@/lib/eventTypes';
 import { useS3Upload, apiFetch } from '@/composables/useS3Upload';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
+import { useStitchedSplit } from '@/composables/useStitchedSplit.js';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
+import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
 
 const props = defineProps({
     event: { type: Object, required: true },
@@ -220,6 +222,34 @@ const onTrackSelected = (event) => {
     for (const file of files) enqueueTrackWithSplit(file);
 };
 
+// Multi-file recording flow: stitch the mixer's 4 GB chunks into one virtual
+// timeline, then split into per-song segments before upload.
+const {
+    stitchedDialogVisible: trackStitchedDialogVisible,
+    pendingStitchedFiles: pendingTrackStitchedFiles,
+    openStitchedSplit: openTrackStitchedSplit,
+    onStitchedCommit: onTrackStitchedCommit,
+    onStitchedCancel: onTrackStitchedCancel,
+} = useStitchedSplit((file) => addTrackFiles([file]));
+
+const stitchedTrackInput = ref(null);
+const pickStitchedTracks = () => stitchedTrackInput.value?.click();
+const onStitchedTracksSelected = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length < 2) {
+        toast?.add({ severity: 'warn', summary: 'Pick multiple files', detail: 'Select two or more WAV files to stitch and split.', life: 4000 });
+        return;
+    }
+    for (const f of files) {
+        if (!/\.wav$/i.test(f.name)) {
+            toast?.add({ severity: 'error', summary: 'Invalid file', detail: `${f.name}: only .wav files are allowed`, life: 4000 });
+            return;
+        }
+    }
+    openTrackStitchedSplit(files);
+};
+
 const confirmDeleteMedia = (item) => confirm.require({
     message: `Delete "${item.name}"? This cannot be undone.`,
     header: 'Delete media',
@@ -280,6 +310,13 @@ const openLightbox = (item) => { lightbox.value = item; };
         @upload-whole="onTrackSplitUploadWhole"
         @cancel="onTrackSplitCancel"
     />
+    <StitchedSplitDialog
+        v-if="canEdit"
+        v-model:visible="trackStitchedDialogVisible"
+        :files="pendingTrackStitchedFiles"
+        @commit="onTrackStitchedCommit"
+        @cancel="onTrackStitchedCancel"
+    />
     <component :is="Layout">
         <template #header>
             <div class="header">
@@ -313,8 +350,9 @@ const openLightbox = (item) => { lightbox.value = item; };
                 <div class="section-head">
                     <h3>Tracks</h3>
                     <template v-if="canEdit">
-                        <!-- Hidden file picker; the visible "Upload a track" button lives below. -->
+                        <!-- Hidden file pickers; the visible upload buttons live below. -->
                         <input ref="trackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onTrackSelected" />
+                        <input ref="stitchedTrackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onStitchedTracksSelected" />
                         <Button v-if="assignableTracks.length" icon="pi pi-plus" label="Add existing" size="small" text @click="showAddTracks = true" />
                     </template>
                 </div>
@@ -331,12 +369,16 @@ const openLightbox = (item) => { lightbox.value = item; };
                 <div v-if="!tracks.length" class="empty">
                     <i class="pi pi-volume-up" />
                     <p>No tracks in this event yet.</p>
-                    <Button v-if="canEdit" label="Upload a track" icon="pi pi-upload" size="small" @click="pickTrack" />
+                    <div v-if="canEdit" class="empty-actions">
+                        <Button label="Upload a track" icon="pi pi-upload" size="small" @click="pickTrack" />
+                        <Button label="Stitch & split" icon="pi pi-objects-column" severity="secondary" outlined size="small" @click="pickStitchedTracks" />
+                    </div>
                 </div>
                 <Card v-else>
                     <template #content>
                         <div v-if="canEdit" class="card-actions">
                             <Button icon="pi pi-upload" label="Upload a track" size="small" outlined @click="pickTrack" />
+                            <Button icon="pi pi-objects-column" label="Stitch & split" size="small" outlined severity="secondary" @click="pickStitchedTracks" />
                         </div>
                         <div class="track-list">
                             <div v-for="(track, i) in tracks" :key="track.id" class="track-row">
@@ -524,7 +566,8 @@ const openLightbox = (item) => { lightbox.value = item; };
 .empty i { font-size: 1.75rem; }
 .empty p { margin: 0; }
 .uploads { margin-bottom: 1rem; }
-.card-actions { display: flex; justify-content: flex-end; margin-bottom: 0.75rem; }
+.card-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-bottom: 0.75rem; }
+.empty-actions { display: flex; gap: 0.5rem; }
 .upload-row { display: flex; flex-direction: column; gap: 0.35rem; margin-bottom: 0.75rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
 .media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr)); gap: 0.75rem; }

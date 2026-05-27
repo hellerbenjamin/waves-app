@@ -19,7 +19,9 @@ import { useConfirm } from 'primevue/useconfirm';
 import Uppy from '@uppy/core';
 import AwsS3 from '@uppy/aws-s3';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
+import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
+import { useStitchedSplit } from '@/composables/useStitchedSplit.js';
 
 defineProps({
     tracks: { type: Array, required: true },
@@ -243,6 +245,39 @@ const {
     onSplitCancel,
 } = useSplitBeforeUpload(queueForUpload);
 
+const {
+    stitchedDialogVisible,
+    pendingStitchedFiles,
+    openStitchedSplit,
+    onStitchedCommit,
+    onStitchedCancel,
+} = useStitchedSplit(queueForUpload);
+
+// Separate picker for multi-file recordings (mixer chunks that should be
+// stitched and re-split). Validates WAV extension and size before opening the
+// dialog so a stray pick fails fast.
+const stitchedInput = ref(null);
+const pickStitched = () => stitchedInput.value?.click();
+const onStitchedSelected = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    if (files.length < 2) {
+        toast.add({ severity: 'warn', summary: 'Pick multiple files', detail: 'Select two or more WAV files to stitch and split.', life: 4000 });
+        return;
+    }
+    for (const f of files) {
+        if (!/\.wav$/i.test(f.name)) {
+            toast.add({ severity: 'error', summary: 'Invalid file', detail: `${f.name}: only .wav files are allowed`, life: 4000 });
+            return;
+        }
+        if (f.size > MAX_UPLOAD_BYTES) {
+            toast.add({ severity: 'error', summary: 'File too large', detail: `${f.name}: ${formatBytes(f.size)} exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} limit`, life: 5000 });
+            return;
+        }
+    }
+    openStitchedSplit(files);
+};
+
 const confirmDelete = (track) => {
     confirm.require({
         message: `Delete "${track.name}"? This cannot be undone.`,
@@ -304,12 +339,22 @@ const submitRename = async () => {
         @upload-whole="onSplitUploadWhole"
         @cancel="onSplitCancel"
     />
+    <StitchedSplitDialog
+        v-model:visible="stitchedDialogVisible"
+        :files="pendingStitchedFiles"
+        @commit="onStitchedCommit"
+        @cancel="onStitchedCancel"
+    />
     <AuthenticatedLayout>
         <template #header>
             <div class="header-row">
                 <h2 class="page-title">Tracks</h2>
-                <Button icon="pi pi-upload" label="Upload .wav" @click="pickFile" />
+                <div class="header-actions">
+                    <Button icon="pi pi-upload" label="Upload .wav" @click="pickFile" />
+                    <Button icon="pi pi-objects-column" label="Stitch & split" severity="secondary" outlined @click="pickStitched" />
+                </div>
                 <input ref="fileInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onFileSelected" />
+                <input ref="stitchedInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onStitchedSelected" />
             </div>
         </template>
 
@@ -407,6 +452,7 @@ const submitRename = async () => {
 
 <style scoped>
 .header-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.header-actions { display: flex; gap: 0.5rem; }
 .page-title { font-size: 1.25rem; font-weight: 600; margin: 0; }
 .stack { display: flex; flex-direction: column; gap: 1.5rem; }
 .upload-list { display: flex; flex-direction: column; gap: 0.875rem; }
