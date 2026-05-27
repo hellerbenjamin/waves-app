@@ -12,3 +12,7 @@ body {
     background: var(--p-surface-50);
     color: var(--p-text-color);
 }
+
+a {
+    text-decoration: none;
+}
