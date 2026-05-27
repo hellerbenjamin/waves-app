@@ -18,6 +18,7 @@ use Closure;
 class EventLinkContext
 {
     /**
+     * @param  Closure(Track): string  $trackShow
      * @param  Closure(Track): string  $trackStream
      * @param  Closure(Media): string  $mediaStream
      * @param  Closure(Media): string  $mediaThumb
@@ -25,6 +26,7 @@ class EventLinkContext
      */
     public function __construct(
         public readonly bool $shared,
+        public readonly Closure $trackShow,
         public readonly Closure $trackStream,
         public readonly Closure $mediaStream,
         public readonly Closure $mediaThumb,
@@ -37,6 +39,7 @@ class EventLinkContext
     {
         return new self(
             shared: false,
+            trackShow: fn (Track $t) => route('tracks.show', $t->id),
             trackStream: fn (Track $t) => route('tracks.stream', $t->id),
             mediaStream: fn (Media $m) => route('media.stream', $m->id),
             mediaThumb: fn (Media $m) => route('media.thumb', $m->id),
@@ -50,6 +53,7 @@ class EventLinkContext
     {
         return new self(
             shared: true,
+            trackShow: fn (Track $t) => route('events.shared.track-show', [$event->share_token, $t->id]),
             trackStream: fn (Track $t) => route('events.shared.track-stream', [$event->share_token, $t->id]),
             mediaStream: fn (Media $m) => route('events.shared.media-stream', [$event->share_token, $m->id]),
             mediaThumb: fn (Media $m) => route('events.shared.media-thumb', [$event->share_token, $m->id]),
@@ -66,6 +70,7 @@ class EventLinkContext
     {
         return new self(
             shared: true,
+            trackShow: fn (Track $t) => route('profile.shared.track-show', [$userToken, $event->id, $t->id]),
             trackStream: fn (Track $t) => route('profile.shared.track-stream', [$userToken, $event->id, $t->id]),
             mediaStream: fn (Media $m) => route('profile.shared.media-stream', [$userToken, $event->id, $m->id]),
             mediaThumb: fn (Media $m) => route('profile.shared.media-thumb', [$userToken, $event->id, $m->id]),

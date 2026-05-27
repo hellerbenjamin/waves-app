@@ -855,6 +855,7 @@ onBeforeUnmount(() => {
                             <span class="time">
                                 {{ formatTime(currentTime) }} / {{ formatTime(track.duration_seconds) }}
                             </span>
+                            <span class="shortcut-hint" aria-hidden="true">Space ⏯ · ← → seek · J/L ±10s</span>
                             <Button
                                 :icon="waveformExpanded ? 'pi pi-chevron-up' : 'pi pi-chevron-down'"
                                 :label="waveformExpanded ? 'Collapse' : 'Expand'"
@@ -866,7 +867,6 @@ onBeforeUnmount(() => {
                                 :aria-pressed="waveformExpanded"
                                 @click="waveformExpanded = !waveformExpanded"
                             />
-                            <span class="shortcut-hint" aria-hidden="true">Space ⏯ · ← → seek · J/L ±10s</span>
                         </div>
                     </template>
 

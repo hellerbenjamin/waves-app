@@ -392,8 +392,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                                         @change="toggleCombineSelection(track)"
                                     />
                                     <span class="track-num">{{ i + 1 }}</span>
-                                    <Link v-if="canEdit" :href="route('tracks.show', track.id)" class="track-link">{{ track.name }}</Link>
-                                    <span v-else class="track-link">{{ track.name }}</span>
+                                    <Link :href="track.show_url" class="track-link">{{ track.name }}</Link>
                                     <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
                                     <Button v-if="canEdit" icon="pi pi-times" severity="secondary" text rounded size="small" aria-label="Remove from event" @click="removeTrack(track)" />
                                 </div>

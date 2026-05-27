@@ -19,7 +19,9 @@ Route::get('/share/{track:share_token}/peaks', [TrackController::class, 'peaksSh
 // A shared event reaches its own tracks and media through the event token, so
 // individual items don't each need a share link.
 Route::get('/events/share/{event:share_token}', [EventController::class, 'showShared'])->name('events.shared');
+Route::get('/events/share/{event:share_token}/tracks/{track}', [EventController::class, 'showSharedTrack'])->name('events.shared.track-show');
 Route::get('/events/share/{event:share_token}/tracks/{track}/stream', [EventController::class, 'streamSharedTrack'])->name('events.shared.track-stream');
+Route::get('/events/share/{event:share_token}/tracks/{track}/peaks', [EventController::class, 'peaksSharedTrack'])->name('events.shared.track-peaks');
 Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
 Route::get('/events/share/{event:share_token}/media/{media}/download', [EventController::class, 'downloadSharedMedia'])->name('events.shared.media-download');
@@ -28,7 +30,9 @@ Route::get('/events/share/{event:share_token}/media/{media}/download', [EventCon
 // through the single profile token, so events don't each need their own link.
 Route::get('/u/{user:share_token}', [PublicProfileController::class, 'show'])->name('profile.shared');
 Route::get('/u/{user:share_token}/events/{event}', [PublicProfileController::class, 'showEvent'])->name('profile.shared.event');
+Route::get('/u/{user:share_token}/events/{event}/tracks/{track}', [PublicProfileController::class, 'showTrack'])->name('profile.shared.track-show');
 Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/stream', [PublicProfileController::class, 'streamTrack'])->name('profile.shared.track-stream');
+Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/peaks', [PublicProfileController::class, 'peaksTrack'])->name('profile.shared.track-peaks');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/stream', [PublicProfileController::class, 'streamMedia'])->name('profile.shared.media-stream');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/thumb', [PublicProfileController::class, 'thumbMedia'])->name('profile.shared.media-thumb');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/download', [PublicProfileController::class, 'downloadMedia'])->name('profile.shared.media-download');

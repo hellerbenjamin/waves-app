@@ -10,6 +10,7 @@ use App\Services\MediaStorage;
 use App\Services\TrackStorage;
 use App\Support\EventLinkContext;
 use App\Support\EventPresenter;
+use App\Support\TrackPresenter;
 use Inertia\Inertia;
 use Inertia\Response;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
@@ -26,6 +27,7 @@ class PublicProfileController extends Controller
         private TrackStorage $tracks,
         private MediaStorage $media,
         private EventPresenter $presenter,
+        private TrackPresenter $trackPresenter,
     ) {}
 
     public function show(User $user): Response
@@ -71,11 +73,34 @@ class PublicProfileController extends Controller
     // Every item is double-checked: it must belong to this event, and the event
     // must belong to the token's owner.
 
+    public function showTrack(User $user, Event $event, Track $track): Response
+    {
+        abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
+
+        return Inertia::render('Tracks/Show', [
+            'canEdit' => false,
+            'templates' => [],
+            'track' => $this->trackPresenter->show(
+                $track,
+                route('profile.shared.track-stream', [$user->share_token, $event->id, $track->id]),
+                route('profile.shared.track-peaks', [$user->share_token, $event->id, $track->id]),
+                shared: true,
+            ),
+        ]);
+    }
+
     public function streamTrack(User $user, Event $event, Track $track): SymfonyResponse
     {
         abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
 
         return $this->tracks->streamResponse($track);
+    }
+
+    public function peaksTrack(User $user, Event $event, Track $track): SymfonyResponse
+    {
+        abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
+
+        return $this->tracks->peaksResponse($track);
     }
 
     public function streamMedia(User $user, Event $event, Media $media): SymfonyResponse

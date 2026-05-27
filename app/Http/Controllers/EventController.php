@@ -13,6 +13,7 @@ use App\Services\MediaStorage;
 use App\Services\TrackStorage;
 use App\Support\EventLinkContext;
 use App\Support\EventPresenter;
+use App\Support\TrackPresenter;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -30,6 +31,7 @@ class EventController extends Controller
         private TrackStorage $tracks,
         private MediaStorage $media,
         private EventPresenter $presenter,
+        private TrackPresenter $trackPresenter,
     ) {}
 
     public function index(Request $request): Response
@@ -193,11 +195,34 @@ class EventController extends Controller
     // A shared event grants access to its own tracks/media without each item
     // needing its own share link; ownership is the event token plus membership.
 
+    public function showSharedTrack(Event $event, Track $track): Response
+    {
+        abort_unless($track->event_id === $event->id, 404);
+
+        return Inertia::render('Tracks/Show', [
+            'canEdit' => false,
+            'templates' => [],
+            'track' => $this->trackPresenter->show(
+                $track,
+                route('events.shared.track-stream', [$event->share_token, $track->id]),
+                route('events.shared.track-peaks', [$event->share_token, $track->id]),
+                shared: true,
+            ),
+        ]);
+    }
+
     public function streamSharedTrack(Event $event, Track $track): SymfonyResponse
     {
         abort_unless($track->event_id === $event->id, 404);
 
         return $this->tracks->streamResponse($track);
+    }
+
+    public function peaksSharedTrack(Event $event, Track $track): SymfonyResponse
+    {
+        abort_unless($track->event_id === $event->id, 404);
+
+        return $this->tracks->peaksResponse($track);
     }
 
     public function streamSharedMedia(Event $event, Media $media): SymfonyResponse

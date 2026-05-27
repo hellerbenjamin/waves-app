@@ -9,6 +9,7 @@ use App\Jobs\CombineTracks;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
 use App\Services\TrackStorage;
+use App\Support\TrackPresenter;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -22,7 +23,10 @@ class TrackController extends Controller
 {
     use AuthorizesRequests;
 
-    public function __construct(private TrackStorage $storage) {}
+    public function __construct(
+        private TrackStorage $storage,
+        private TrackPresenter $presenter,
+    ) {}
 
     public function index(Request $request): Response
     {
@@ -67,7 +71,12 @@ class TrackController extends Controller
             // channel count — candidates to "Copy mix from".
             'mixSources' => $this->mixSourcesFor($request, $track),
             'track' => array_merge(
-                $this->trackProps($track, route('tracks.stream', $track->id)),
+                $this->presenter->show(
+                    $track,
+                    route('tracks.stream', $track->id),
+                    route('tracks.peaks', $track->id),
+                    shared: false,
+                ),
                 ['share_url' => $track->share_token ? route('tracks.shared', $track->share_token) : null],
             ),
         ]);
@@ -78,7 +87,12 @@ class TrackController extends Controller
         return Inertia::render('Tracks/Show', [
             'canEdit' => false,
             'templates' => [],
-            'track' => $this->trackProps($track, route('tracks.shared-stream', $track->share_token), shared: true),
+            'track' => $this->presenter->show(
+                $track,
+                route('tracks.shared-stream', $track->share_token),
+                route('tracks.shared-peaks', $track->share_token),
+                shared: true,
+            ),
         ]);
     }
 
@@ -209,39 +223,6 @@ class TrackController extends Controller
                 'default_mix' => $t->default_mix,
             ])
             ->all();
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function trackProps(Track $track, string $streamUrl, bool $shared = false): array
-    {
-        $peaksRoute = $shared
-            ? route('tracks.shared-peaks', $track->share_token)
-            : route('tracks.peaks', $track->id);
-
-        return [
-            'id' => $track->id,
-            'name' => $track->original_name,
-            'size' => $track->size,
-            'mime' => $track->mime,
-            'duration_seconds' => $track->duration_seconds,
-            'channels_count' => (int) $track->channels_count,
-            'sample_rate' => (int) $track->sample_rate,
-            'channel_labels' => $track->channel_labels,
-            // Saved mixer state both views initialise to. Shared viewers see it
-            // applied but can't save changes back (the update route is auth'd).
-            'default_mix' => $track->default_mix,
-            'peaks_ready' => (bool) $track->peaks_ready,
-            // Peaks JSON lives in object storage; the mixer fetches it via this
-            // URL instead of receiving it inline in the Inertia payload.
-            'peaks_url' => $this->storage->peaksUrl($track, $peaksRoute, $shared),
-            'created_at' => $track->created_at?->toIso8601String(),
-            'stream_url' => $this->storage->playbackUrl($track, $streamUrl, $shared),
-            // How the player must load the stream so it stays CORS-clean for
-            // the per-channel mixer: 'anonymous' for presigned S3, else creds.
-            'stream_cross_origin' => $this->storage->streamCrossOrigin(),
-        ];
     }
 
     public function uploadUrl(UploadUrlRequest $request): array
