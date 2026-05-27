@@ -230,6 +230,66 @@ const adjustBoost = (i, delta) => {
     applyGain(i);
 };
 
+// Auto-level the channels. Reads the cached peaks envelope (one [max, min,
+// max, min, …] list per channel) to estimate each channel's loudness, then
+// brings the quieter ones up to match the loudest by splitting the needed gain
+// between the 5 dB-stepped trim and the 0–100 % fader. Mute/solo/pan are left
+// alone — this only equalises levels.
+const automixApplied = ref(false);
+const automixAvailable = computed(() => {
+    return !!peaksChannels.value
+        && peaksChannels.value.length === channelCount()
+        && channelCount() >= 2;
+});
+
+const channelLoudness = (envelope) => {
+    if (!envelope?.length) return 0;
+    let sum = 0;
+    for (let i = 0; i < envelope.length; i++) sum += Math.abs(envelope[i]);
+    return sum / envelope.length;
+};
+
+const runAutomix = () => {
+    if (!automixAvailable.value || !gainNodes.length) return;
+
+    const loudness = peaksChannels.value.map(channelLoudness);
+    const target = Math.max(...loudness);
+    if (target <= 0) return; // every channel is silent — nothing to do
+
+    const channels = channelCount();
+    for (let i = 0; i < channels; i++) {
+        const L = loudness[i];
+        if (L <= 0) {
+            // Silent stays silent — bumping the fader would just amplify hiss.
+            levels.value[i] = 0;
+            boosts.value[i] = 0;
+            continue;
+        }
+        const ratio = target / L; // ≥ 1; how much lift this channel needs
+        const gainDb = 20 * Math.log10(ratio);
+        // Snap to the nearest 5 dB trim step that doesn't overshoot, then fill
+        // the remainder with the fader (which can't go above unity gain).
+        const trim = Math.max(0, Math.min(BOOST_MAX, Math.floor(gainDb / 5) * 5));
+        const remaining = ratio / dbToLinear(trim); // typically ≤ ~1.78
+        const fader = Math.max(0, Math.min(100, Math.round(remaining * 100)));
+        boosts.value[i] = trim;
+        levels.value[i] = fader;
+    }
+
+    applyAllGains();
+    automixApplied.value = true;
+};
+
+const resetAutomix = () => {
+    const channels = channelCount();
+    for (let i = 0; i < channels; i++) {
+        levels.value[i] = 100;
+        boosts.value[i] = 0;
+    }
+    applyAllGains();
+    automixApplied.value = false;
+};
+
 // Flipping any channel's solo changes which other channels are audible, so
 // re-apply gain on the whole strip.
 const applyAllGains = () => {
@@ -854,7 +914,13 @@ onBeforeUnmount(() => {
                     </Message>
 
                     <template v-if="track.peaks_ready">
-                        <div ref="waveformEl" class="waveform" :class="{ 'is-loading': !isReady }" />
+                        <div class="waveform-wrap">
+                            <div ref="waveformEl" class="waveform" :class="{ 'is-loading': !isReady || !audioReady }" />
+                            <div v-if="!isReady || !audioReady" class="waveform-loading" role="status" aria-live="polite">
+                                <i class="pi pi-spin pi-spinner" />
+                                <span>{{ !isReady ? 'Loading waveform…' : 'Buffering audio…' }}</span>
+                            </div>
+                        </div>
 
                         <div ref="controlsEl" class="controls">
                             <Button
@@ -871,9 +937,6 @@ onBeforeUnmount(() => {
                                 aria-label="Restart"
                                 @click="restart"
                             />
-                            <span v-if="isReady && !audioReady" class="buffering">
-                                <i class="pi pi-spin pi-spinner" /> Buffering…
-                            </span>
                             <span class="time">
                                 {{ formatTime(currentTime) }} / {{ formatTime(track.duration_seconds) }}
                             </span>
@@ -912,6 +975,19 @@ onBeforeUnmount(() => {
                                 <template v-else-if="labelsStatus === 'saved' || mixStatus === 'saved'"><i class="pi pi-check" /> Saved</template>
                             </span>
                             <Tag v-if="hasDefaultMix" value="Default mix saved" severity="success" class="mix-tag" />
+                            <Button
+                                :label="automixApplied ? 'Reset' : 'Automix'"
+                                :icon="automixApplied ? 'pi pi-refresh' : 'pi pi-bolt'"
+                                size="small"
+                                :outlined="!automixApplied"
+                                :severity="automixApplied ? 'warning' : 'primary'"
+                                class="automix-btn"
+                                :disabled="!automixAvailable"
+                                :title="automixAvailable
+                                    ? (automixApplied ? 'Restore unity faders and clear trim' : 'Balance channels: lift quieter ones up to the loudest using trim + fader')
+                                    : 'Automix needs a finished waveform with 2+ channels'"
+                                @click="automixApplied ? resetAutomix() : runAutomix()"
+                            />
                             <Button
                                 label="Channel names"
                                 icon="pi pi-tag"
@@ -1157,8 +1233,18 @@ onBeforeUnmount(() => {
 .back-link:hover { color: var(--p-text-color); }
 .stack { display: flex; flex-direction: column; gap: 1.5rem; }
 
+.waveform-wrap { position: relative; }
 .waveform { width: 100%; transition: opacity 0.2s; }
-.waveform.is-loading { opacity: 0.4; }
+.waveform.is-loading { opacity: 0.25; }
+.waveform-loading {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+    font-size: 0.875rem; font-weight: 500; color: var(--p-text-color);
+    background: color-mix(in srgb, var(--p-content-background) 55%, transparent);
+    border-radius: 6px;
+    pointer-events: none;
+}
+.waveform-loading .pi-spinner { font-size: 1.1rem; }
 
 .controls { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.25rem; flex-wrap: wrap; }
 .time {
@@ -1606,6 +1692,9 @@ onBeforeUnmount(() => {
     .fader.is-horizontal .pan { display: none; }
     /* Same for the preamp trim — desktop-only control. */
     .fader.is-horizontal .trim { display: none; }
+    /* Automix is a desktop-only convenience too. Mobile users can still tweak
+       individual faders, but the auto-balance pass needs the desktop layout. */
+    .automix-btn { display: none; }
 }
 
 .mini-transport {
