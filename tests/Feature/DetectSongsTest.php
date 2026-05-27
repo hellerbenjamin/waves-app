@@ -39,7 +39,9 @@ class DetectSongsTest extends TestCase
         $track = Track::factory()->for($user)->create([
             's3_key' => $key,
             'original_name' => 'show.wav',
-            'peaks' => ['channels' => [], 'sample_rate' => 44100],
+            'peaks_ready' => true,
+            'channels_count' => 1,
+            'sample_rate' => 44100,
             'duration_seconds' => 8.0,
         ]);
 

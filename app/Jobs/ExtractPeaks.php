@@ -3,6 +3,7 @@
 namespace App\Jobs;
 
 use App\Models\Track;
+use App\Services\TrackStorage;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Process;
@@ -26,7 +27,7 @@ class ExtractPeaks implements ShouldQueue
 
     public function __construct(public Track $track) {}
 
-    public function handle(): void
+    public function handle(TrackStorage $storage): void
     {
         // Queue worker enforces $timeout; PHP's own max_execution_time (30s on
         // Forge) would otherwise kill the decode loop mid-stream.
@@ -44,12 +45,21 @@ class ExtractPeaks implements ShouldQueue
         $totalFrames = max(1, (int) round($duration * $sampleRate));
         $framesPerPair = max(1, (int) ceil($totalFrames / $pairs));
 
+        // Peaks payload now lives next to the WAV in object storage — keeping it
+        // out of the DB keeps `tracks` slim and avoids dragging multi-MB JSON
+        // through MySQL's sort buffer on any list/sort query.
+        $envelope = [
+            'channels' => $this->extract($source, $channels, $framesPerPair, $pairs, $remote),
+            'sample_rate' => $sampleRate,
+        ];
+
+        $storage->putContents($storage->peaksKey($this->track), json_encode($envelope));
+
         $this->track->update([
             'duration_seconds' => $duration,
-            'peaks' => [
-                'channels' => $this->extract($source, $channels, $framesPerPair, $pairs, $remote),
-                'sample_rate' => $sampleRate,
-            ],
+            'channels_count' => $channels,
+            'sample_rate' => $sampleRate,
+            'peaks_ready' => true,
         ]);
     }
 

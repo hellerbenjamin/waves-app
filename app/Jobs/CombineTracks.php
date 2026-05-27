@@ -19,9 +19,10 @@ use RuntimeException;
  * intact and surfaces in the queue log.
  *
  * Sample rate and channel count were checked at the request level (cheap, from
- * the peaks JSON). Bit depth lives only inside each WAV header, so we probe
- * each source here with ffprobe and refuse to mix mismatched depths — concat
- * with `-c copy` is sample-accurate but assumes byte-identical PCM frames.
+ * the cached columns on tracks). Bit depth lives only inside each WAV header,
+ * so we probe each source here with ffprobe and refuse to mix mismatched
+ * depths — concat with `-c copy` is sample-accurate but assumes byte-identical
+ * PCM frames.
  */
 class CombineTracks implements ShouldQueue
 {
@@ -134,6 +135,7 @@ class CombineTracks implements ShouldQueue
             foreach ($ordered as $track) {
                 try {
                     $storage->delete($track->s3_key);
+                    $storage->delete($storage->peaksKey($track));
                 } catch (\Throwable) {
                     // ignore — bytes will linger but the user-visible state is correct
                 }
@@ -152,8 +154,8 @@ class CombineTracks implements ShouldQueue
     /**
      * Probe each source with ffprobe and require an exact format match across
      * codec, sample rate, bit depth, and channel count. The request layer has
-     * already ruled out a sample-rate or channel mismatch from the peaks JSON;
-     * this catches the bit-depth case that isn't in peaks.
+     * already ruled out a sample-rate or channel mismatch from the cached
+     * columns; this catches the bit-depth case that isn't recorded there.
      *
      * @param  \Illuminate\Support\Collection<int, Track>  $tracks
      */

@@ -22,7 +22,7 @@ class ReprocessTracks extends Command
 
         $tracks = Track::query()
             ->when($ids, fn (Builder $q) => $q->whereIn('id', $ids))
-            ->when($this->option('missing'), fn (Builder $q) => $q->whereNull('peaks'))
+            ->when($this->option('missing'), fn (Builder $q) => $q->where('peaks_ready', false))
             ->get();
 
         if ($tracks->isEmpty()) {

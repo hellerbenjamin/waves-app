@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -22,7 +21,9 @@ class Track extends Model
         'mime',
         'size',
         'content_hash',
-        'peaks',
+        'channels_count',
+        'sample_rate',
+        'peaks_ready',
         'channel_labels',
         'default_mix',
         'duration_seconds',
@@ -31,11 +32,13 @@ class Track extends Model
     ];
 
     protected $casts = [
-        'peaks' => 'array',
         'channel_labels' => 'array',
         'default_mix' => 'array',
         'split_proposal' => 'array',
         'size' => 'integer',
+        'channels_count' => 'integer',
+        'sample_rate' => 'integer',
+        'peaks_ready' => 'boolean',
         'duration_seconds' => 'float',
     ];
 
@@ -60,30 +63,11 @@ class Track extends Model
         return $this->hasMany(Track::class, 'parent_track_id');
     }
 
-    protected function peaksReady(): Attribute
-    {
-        return Attribute::get(function () {
-            // List/sort queries (see scopeForCards) select a cheap
-            // `peaks is not null` flag instead of the peaks JSON itself: that
-            // payload can be huge for multi-GB tracks, and carrying it through a
-            // filesort blows MySQL's sort buffer ("Out of sort memory"). Prefer
-            // that flag when present; otherwise derive it from the loaded peaks.
-            if (array_key_exists('peaks_ready', $this->attributes)) {
-                return (bool) $this->attributes['peaks_ready'];
-            }
-
-            return $this->peaks !== null;
-        });
-    }
-
-    /**
-     * Columns the track cards need, with `peaks_ready` standing in for the heavy
-     * `peaks` payload so listing/sorting never loads it.
-     */
+    /** Cheap columns the track cards render from — never carries the peaks envelope (it lives in object storage). */
     public function scopeForCards(Builder $query): Builder
     {
-        return $query
-            ->select(['id', 'event_id', 'original_name', 'duration_seconds', 's3_key'])
-            ->selectRaw('peaks is not null as peaks_ready');
+        return $query->select([
+            'id', 'event_id', 'original_name', 'duration_seconds', 's3_key', 'peaks_ready', 'channels_count',
+        ]);
     }
 }

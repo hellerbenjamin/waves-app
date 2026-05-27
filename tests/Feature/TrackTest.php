@@ -59,9 +59,13 @@ class TrackTest extends TestCase
         $track = Track::factory()->for($user)->withPeaks()->create(['original_name' => 'mix.wav']);
 
         // On s3 the player loads a presigned object URL directly (not the app
-        // stream route) so it stays CORS-clean for the mixer.
+        // stream route) so it stays CORS-clean for the mixer. The peaks JSON is
+        // fetched the same way — a second presign on the sibling .peaks.json
+        // key, which the mixer pulls async.
         $disk = Mockery::mock(AwsS3V3Adapter::class);
-        $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-stream');
+        $disk->shouldReceive('temporaryUrl')
+            ->twice()
+            ->andReturn('https://s3.example/signed-peaks', 'https://s3.example/signed-stream');
         Storage::shouldReceive('disk')->andReturn($disk);
 
         $this->actingAs($user)
@@ -72,9 +76,10 @@ class TrackTest extends TestCase
                 ->where('track.id', $track->id)
                 ->where('track.name', 'mix.wav')
                 ->where('track.peaks_ready', true)
+                ->where('track.channels_count', 1)
                 ->where('track.stream_url', 'https://s3.example/signed-stream')
+                ->where('track.peaks_url', 'https://s3.example/signed-peaks')
                 ->where('track.stream_cross_origin', 'anonymous') // s3 disk in tests
-                ->has('track.peaks.channels')
             );
     }
 
@@ -92,7 +97,9 @@ class TrackTest extends TestCase
     {
         $user = User::factory()->create();
         $track = Track::factory()->for($user)->create([
-            'peaks' => ['channels' => [[0.1, -0.1], [0.2, -0.2]], 'sample_rate' => 44100],
+            'peaks_ready' => true,
+            'channels_count' => 2,
+            'sample_rate' => 44100,
             'duration_seconds' => 10.0,
         ]);
 
@@ -110,7 +117,9 @@ class TrackTest extends TestCase
         $track = Track::factory()->for($user)->create([
             'original_name' => 'old.wav',
             'channel_labels' => ['Kick', 'Snare'],
-            'peaks' => ['channels' => [[0.1, -0.1], [0.2, -0.2]], 'sample_rate' => 44100],
+            'peaks_ready' => true,
+            'channels_count' => 2,
+            'sample_rate' => 44100,
             'duration_seconds' => 10.0,
         ]);
 

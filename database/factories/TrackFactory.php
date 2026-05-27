@@ -23,7 +23,9 @@ class TrackFactory extends Factory
             'mime' => 'audio/wav',
             'size' => fake()->numberBetween(1_000_000, 50_000_000),
             'content_hash' => null,
-            'peaks' => null,
+            'peaks_ready' => false,
+            'channels_count' => null,
+            'sample_rate' => null,
             'duration_seconds' => null,
         ];
     }
@@ -40,7 +42,9 @@ class TrackFactory extends Factory
     public function withPeaks(): self
     {
         return $this->state(fn () => [
-            'peaks' => ['channels' => [[0.1, -0.1, 0.2, -0.2]], 'sample_rate' => 44100],
+            'peaks_ready' => true,
+            'channels_count' => 1,
+            'sample_rate' => 44100,
             'duration_seconds' => 123.4,
         ]);
     }

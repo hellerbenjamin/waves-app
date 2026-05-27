@@ -56,7 +56,10 @@ let pollTimer = null;
 let regions = null; // wavesurfer Regions plugin instance
 let suppressRegionEvents = false; // guard against feedback loops during sync
 
-const channelCount = () => props.track.peaks?.channels?.length ?? 0;
+const channelCount = () => props.track.channels_count ?? 0;
+
+// Peaks envelope fetched async from object storage (see initWaveform).
+const peaksChannels = ref(null);
 
 const channelLabel = (i, total) => {
     if (total <= 1) return 'Mono';
@@ -408,6 +411,24 @@ const streamReachable = async () => {
     }
 };
 
+// Pull the peaks envelope from object storage. Returns null on any failure —
+// the waveform then renders empty rather than failing the whole page, and the
+// regenerate path is `tracks:reprocess` on the server.
+const loadPeaks = async () => {
+    if (!props.track.peaks_url) return null;
+    try {
+        const res = await fetch(props.track.peaks_url, {
+            // Owner pages get a presigned (no-cookies) URL; share/local routes
+            // are same-origin and need the session cookie.
+            credentials: props.track.stream_cross_origin === 'anonymous' ? 'omit' : 'include',
+        });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch {
+        return null;
+    }
+};
+
 let initStarted = false;
 
 const initWaveform = async () => {
@@ -416,12 +437,16 @@ const initWaveform = async () => {
 
     const channels = channelCount();
 
-    // Per-channel mixing and crossorigin='anonymous' both need to read the
-    // stream's bytes, which for an off-origin URL hinges on the bucket's CORS.
-    // Probe once: if reachable, load CORS-clean and build the mixer; if not,
-    // fall back to a plain element so playback stays audible (sans faders)
-    // rather than failing to load or muting silently.
-    const corsOk = await streamReachable();
+    // Fetch the peaks envelope from object storage in parallel with the CORS
+    // probe. Peaks used to ride inline in the Inertia payload, but they can be
+    // MB-large per track and would balloon the HTML response; pulling them
+    // separately lets the page render while the waveform data is on the wire.
+    const [corsOk, envelope] = await Promise.all([
+        streamReachable(),
+        loadPeaks(),
+    ]);
+
+    peaksChannels.value = envelope?.channels ?? null;
 
     // Stream playback through a media element so large files seek via HTTP
     // range requests instead of being fully downloaded; the waveform itself
@@ -436,7 +461,7 @@ const initWaveform = async () => {
     ws = WaveSurfer.create({
         container: waveformEl.value,
         media: audio,
-        peaks: props.track.peaks?.channels ?? undefined,
+        peaks: peaksChannels.value ?? undefined,
         duration: props.track.duration_seconds ?? undefined,
         splitChannels: channels > 1 ? Array.from({ length: channels }, () => ({})) : undefined,
         height: channels > 1 ? 64 : 140,

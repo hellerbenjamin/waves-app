@@ -14,6 +14,7 @@ use Inertia\Inertia;
 // Public share links — no auth; the unguessable token is the access control.
 Route::get('/share/{track:share_token}', [TrackController::class, 'showShared'])->name('tracks.shared');
 Route::get('/share/{track:share_token}/stream', [TrackController::class, 'streamShared'])->name('tracks.shared-stream');
+Route::get('/share/{track:share_token}/peaks', [TrackController::class, 'peaksShared'])->name('tracks.shared-peaks');
 
 // A shared event reaches its own tracks and media through the event token, so
 // individual items don't each need a share link.
@@ -68,6 +69,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/tracks', [TrackController::class, 'index'])->name('tracks.index');
     Route::get('/tracks/{track}', [TrackController::class, 'show'])->name('tracks.show');
     Route::get('/tracks/{track}/stream', [TrackController::class, 'stream'])->name('tracks.stream');
+    Route::get('/tracks/{track}/peaks', [TrackController::class, 'peaks'])->name('tracks.peaks');
     Route::get('/tracks/{track}/download', [TrackController::class, 'download'])->name('tracks.download');
     Route::patch('/tracks/{track}', [TrackController::class, 'update'])->name('tracks.update');
     Route::post('/tracks/upload-url', [TrackController::class, 'uploadUrl'])->name('tracks.upload-url');

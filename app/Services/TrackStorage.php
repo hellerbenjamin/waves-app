@@ -155,4 +155,62 @@ class TrackStorage
     {
         return $this->isS3() ? 'anonymous' : 'use-credentials';
     }
+
+    /**
+     * The storage key for a track's peaks envelope. Lives alongside the WAV in
+     * the same per-user namespace (so ownership is still derivable from the key
+     * prefix) and is generated deterministically from the WAV key so a deleted
+     * track always cleans up the right sibling.
+     */
+    public function peaksKey(Track $track): string
+    {
+        return $this->peaksKeyFor($track->s3_key);
+    }
+
+    public function peaksKeyFor(string $wavKey): string
+    {
+        return preg_replace('/\.wav$/i', '.peaks.json', $wavKey);
+    }
+
+    /**
+     * The URL the mixer fetches peaks from. Mirrors playbackUrl(): on S3 the
+     * owner gets a presigned object URL baked into the page (CORS-clean for
+     * the in-page fetch); a shared viewer always uses the given in-app route
+     * so revoking a share token kills peak access too. Local disks always use
+     * the route. Returns null until the peaks file exists.
+     */
+    public function peaksUrl(Track $track, string $localRoute, bool $shared = false): ?string
+    {
+        if (! $track->peaks_ready) {
+            return null;
+        }
+
+        if ($this->isS3() && ! $shared) {
+            return $this->disk()->temporaryUrl($this->peaksKey($track), now()->addHours(6));
+        }
+
+        return $localRoute;
+    }
+
+    /**
+     * Build a response that serves the peaks JSON: redirects to a short-lived
+     * presigned URL on S3, or streams the file on a local disk. Used by both
+     * the auth'd and shared peaks routes.
+     */
+    public function peaksResponse(Track $track): SymfonyResponse
+    {
+        $key = $this->peaksKey($track);
+
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl($key, now()->addMinutes(30)));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($key), 404);
+
+        return response()->file($disk->path($key), ['Content-Type' => 'application/json']);
+    }
 }

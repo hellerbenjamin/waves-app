@@ -31,11 +31,7 @@ class TrackController extends Controller
         $tracks = $request->user()
             ->tracks()
             ->with('event:id,name')
-            // Select a cheap readiness flag rather than the peaks JSON itself —
-            // that payload is huge for multi-GB tracks and would blow MySQL's
-            // sort buffer when this list is ordered (see Track::scopeForCards).
-            ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'created_at'])
-            ->selectRaw('peaks is not null as peaks_ready')
+            ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'peaks_ready', 'created_at'])
             ->latest()
             ->get()
             ->map(fn (Track $t) => [
@@ -70,8 +66,7 @@ class TrackController extends Controller
                 ->latest()
                 ->get(['id', 'name', 'labels']),
             // Owner's other tracks with a saved default mix and a matching
-            // channel count — candidates to "Copy mix from". Filter on
-            // JSON_LENGTH so the huge peaks blob never leaves the DB.
+            // channel count — candidates to "Copy mix from".
             'mixSources' => $this->mixSourcesFor($request, $track),
             'track' => array_merge(
                 $this->trackProps($track, route('tracks.stream', $track->id)),
@@ -126,7 +121,7 @@ class TrackController extends Controller
 
         if (array_key_exists('channel_labels', $data)) {
             // Normalise blank entries to null and drop any beyond the channel count.
-            $channels = count($track->peaks['channels'] ?? []);
+            $channels = (int) $track->channels_count;
             $changes['channel_labels'] = collect($data['channel_labels'])
                 ->take($channels)
                 ->map(fn ($label) => filled(trim((string) $label)) ? trim((string) $label) : null)
@@ -137,7 +132,7 @@ class TrackController extends Controller
             // null clears the saved mix; otherwise trim to the channel count
             // and coerce types so the client always reads back the same shape
             // it writes (and shared viewers get something safe to apply).
-            $channels = count($track->peaks['channels'] ?? []);
+            $channels = (int) $track->channels_count;
             $changes['default_mix'] = $data['default_mix'] === null ? null : collect($data['default_mix'])
                 ->take($channels)
                 ->map(fn ($entry) => [
@@ -176,16 +171,27 @@ class TrackController extends Controller
         return $this->storage->streamResponse($track);
     }
 
+    public function peaks(Track $track): SymfonyResponse
+    {
+        $this->authorize('view', $track);
+
+        return $this->storage->peaksResponse($track);
+    }
+
+    public function peaksShared(Track $track): SymfonyResponse
+    {
+        return $this->storage->peaksResponse($track);
+    }
+
     /**
      * Candidate source tracks for "Copy mix from…": owner's other tracks with
-     * a saved default_mix and the same channel count. Filter at the DB on
-     * JSON_LENGTH(peaks, '$.channels') so we never load the peaks payload.
+     * a saved default_mix and the same channel count.
      *
      * @return array<int, array<string, mixed>>
      */
     private function mixSourcesFor(Request $request, Track $track): array
     {
-        $channels = count($track->peaks['channels'] ?? []);
+        $channels = (int) $track->channels_count;
         if ($channels < 1) {
             return [];
         }
@@ -194,7 +200,7 @@ class TrackController extends Controller
             ->tracks()
             ->whereKeyNot($track->id)
             ->whereNotNull('default_mix')
-            ->whereJsonLength('peaks->channels', $channels)
+            ->where('channels_count', $channels)
             ->select(['id', 'original_name', 'default_mix'])
             ->latest()
             ->get()
@@ -211,22 +217,29 @@ class TrackController extends Controller
      */
     private function trackProps(Track $track, string $streamUrl, bool $shared = false): array
     {
+        $peaksRoute = $shared
+            ? route('tracks.shared-peaks', $track->share_token)
+            : route('tracks.peaks', $track->id);
+
         return [
             'id' => $track->id,
             'name' => $track->original_name,
             'size' => $track->size,
             'mime' => $track->mime,
             'duration_seconds' => $track->duration_seconds,
-            'peaks' => $track->peaks,
+            'channels_count' => (int) $track->channels_count,
+            'sample_rate' => (int) $track->sample_rate,
             'channel_labels' => $track->channel_labels,
             // Saved mixer state both views initialise to. Shared viewers see it
             // applied but can't save changes back (the update route is auth'd).
             'default_mix' => $track->default_mix,
-            'peaks_ready' => $track->peaks !== null,
+            'peaks_ready' => (bool) $track->peaks_ready,
+            // Peaks JSON lives in object storage; the mixer fetches it via this
+            // URL instead of receiving it inline in the Inertia payload.
+            'peaks_url' => $this->storage->peaksUrl($track, $peaksRoute, $shared),
             'split_proposal' => $shared ? null : $track->split_proposal,
             'children' => $shared ? [] : $track->children()
-                ->select(['id', 'original_name', 'duration_seconds'])
-                ->selectRaw('peaks is not null as peaks_ready')
+                ->select(['id', 'original_name', 'duration_seconds', 'peaks_ready'])
                 ->orderBy('id')
                 ->get()
                 ->map(fn (Track $c) => [
@@ -391,7 +404,7 @@ class TrackController extends Controller
     public function detectSongs(Request $request, Track $track): JsonResponse
     {
         $this->authorize('update', $track);
-        abort_unless($track->peaks !== null, 422, 'Track is still processing.');
+        abort_unless($track->peaks_ready, 422, 'Track is still processing.');
 
         $validated = $request->validate([
             'silence_db' => ['nullable', 'numeric', 'between:-80,-10'],
@@ -475,7 +488,7 @@ class TrackController extends Controller
     public function commitSplit(Request $request, Track $track): JsonResponse
     {
         $this->authorize('update', $track);
-        abort_unless($track->peaks !== null, 422, 'Track is still processing.');
+        abort_unless($track->peaks_ready, 422, 'Track is still processing.');
 
         $regions = $track->split_proposal['regions'] ?? [];
         abort_if(empty($regions), 422, 'No regions to split.');
@@ -497,9 +510,10 @@ class TrackController extends Controller
      * the job once the combined output is safely in storage.
      *
      * Format-matching is split between layers: sample rate and channel count
-     * are cheap to read from the peaks JSON, so we reject mismatches here
-     * before queueing. Bit-depth lives only in the WAV header and is verified
-     * inside the job (with ffprobe) just before concat.
+     * are cheap to read from the cached columns we hoisted out of the peaks
+     * envelope at extract time, so we reject mismatches here before queueing.
+     * Bit-depth lives only in the WAV header and is verified inside the job
+     * (with ffprobe) just before concat.
      */
     public function combine(Request $request): JsonResponse
     {
@@ -523,10 +537,10 @@ class TrackController extends Controller
 
         $ordered = collect($validated['track_ids'])->map(fn ($id) => $tracks->get($id));
 
-        // Peaks must be present on every source — without them we don't have a
+        // Peaks must be ready on every source — without them we don't have a
         // cheap channel/sample-rate to validate against, and a not-yet-decoded
         // upload is also not safe to concat (its bytes may still be in flight).
-        $missingPeaks = $ordered->first(fn (Track $t) => $t->peaks === null);
+        $missingPeaks = $ordered->first(fn (Track $t) => ! $t->peaks_ready);
         if ($missingPeaks) {
             return response()->json([
                 'message' => "\"{$missingPeaks->original_name}\" is still processing — wait for its waveform before combining.",
@@ -534,12 +548,12 @@ class TrackController extends Controller
         }
 
         $first = $ordered->first();
-        $firstChannels = count($first->peaks['channels'] ?? []);
-        $firstRate = (int) ($first->peaks['sample_rate'] ?? 0);
+        $firstChannels = (int) $first->channels_count;
+        $firstRate = (int) $first->sample_rate;
 
         foreach ($ordered as $track) {
-            $channels = count($track->peaks['channels'] ?? []);
-            $rate = (int) ($track->peaks['sample_rate'] ?? 0);
+            $channels = (int) $track->channels_count;
+            $rate = (int) $track->sample_rate;
 
             if ($channels !== $firstChannels || $rate !== $firstRate) {
                 return response()->json([
@@ -577,6 +591,10 @@ class TrackController extends Controller
         $this->authorize('delete', $track);
 
         $this->storage->delete($track->s3_key);
+        // Best-effort peaks cleanup: the sibling .peaks.json may or may not
+        // exist (older tracks pre-regenerate, or extraction never completed),
+        // but a missing key is a no-op on both S3 and local disks.
+        $this->storage->delete($this->storage->peaksKey($track));
         $track->delete();
 
         return back();
