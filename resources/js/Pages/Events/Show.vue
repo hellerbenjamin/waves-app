@@ -187,7 +187,7 @@ const { uploads, addFiles } = useS3Upload({
             mime: file.type,
             size: file.size,
             event_id: props.event.id,
-        }, { preserveScroll: true, onSuccess: resolve, onError: reject });
+        }, { preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject });
     }),
     onUploaded: (file) => toast?.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 }),
     onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),
@@ -222,7 +222,7 @@ const { uploads: trackUploads, addFiles: addTrackFiles } = useS3Upload({
             mime: file.type || 'audio/wav',
             size: file.size,
             event_id: props.event.id,
-        }, { preserveScroll: true, onSuccess: resolve, onError: reject });
+        }, { preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject });
     }),
     onUploaded: (file) => toast?.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 }),
     onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),

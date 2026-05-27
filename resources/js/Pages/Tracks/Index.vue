@@ -169,7 +169,7 @@ uppy.on('upload-success', async (file) => {
                 original_name: file.name,
                 mime: file.type || 'audio/wav',
                 size: file.size,
-            }, { preserveScroll: true, onSuccess: resolve, onError: reject });
+            }, { preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject });
         });
 
         if (entry) {
