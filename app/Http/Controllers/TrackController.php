@@ -180,13 +180,6 @@ class TrackController extends Controller
         ]);
     }
 
-    public function download(Track $track): SymfonyResponse
-    {
-        $this->authorize('view', $track);
-
-        return $this->storage->downloadResponse($track);
-    }
-
     /**
      * Stream a single transcoded Opus channel of an authed-user-owned track.
      * The channel lookup is by `(track_id, channel_index)` rather than the

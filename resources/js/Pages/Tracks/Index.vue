@@ -419,15 +419,6 @@ const submitRename = async () => {
                         </Column>
                         <Column header="" style="width: 11rem; text-align: right">
                             <template #body="{ data }">
-                                <Button
-                                    icon="pi pi-download"
-                                    severity="secondary"
-                                    text
-                                    rounded
-                                    aria-label="Download"
-                                    :as="'a'"
-                                    :href="route('tracks.download', data.id)"
-                                />
                                 <Button icon="pi pi-pencil" severity="secondary" text rounded aria-label="Rename" @click="openRename(data)" />
                                 <Button icon="pi pi-trash" severity="danger" text rounded aria-label="Delete" @click="confirmDelete(data)" />
                             </template>

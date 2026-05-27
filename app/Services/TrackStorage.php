@@ -72,90 +72,8 @@ class TrackStorage
     }
 
     /**
-     * Build a playable HTTP response for a track. S3 streams (and seeks)
-     * directly from a short-lived signed URL; local disks are served through a
-     * range-aware file response for scrubbing.
-     */
-    public function streamResponse(Track $track): SymfonyResponse
-    {
-        if ($this->isS3()) {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl($track->s3_key, now()->addMinutes(30)));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($track->s3_key), 404);
-
-        return response()->file($disk->path($track->s3_key), [
-            'Content-Type' => $track->mime ?: 'audio/wav',
-        ]);
-    }
-
-    /**
-     * The URL the player loads audio from. For an owner's own page an S3 disk
-     * is handed a presigned object URL directly (self-authenticating, fetched
-     * without cookies, CORS-clean for the mixer); the TTL must outlast a
-     * listening session since it's baked into the page at render time.
-     *
-     * A public share page must stay revocable, so it never bakes in a
-     * long-lived presigned URL: it always uses the given in-app route, which
-     * mints a fresh short-lived URL per request and 404s the moment the share
-     * token is cleared. Local disks always use the route regardless.
-     */
-    public function playbackUrl(Track $track, string $localRoute, bool $shared = false): ?string
-    {
-        // After transcoding, there is no single-WAV stream URL — the player
-        // pulls per-channel Opus directly. The legacy stream/peaks fields stay
-        // in the payload until the player refactor consumes channels instead.
-        if ($track->s3_key === null) {
-            return null;
-        }
-
-        if ($this->isS3() && ! $shared) {
-            return $this->disk()->temporaryUrl($track->s3_key, now()->addHours(6));
-        }
-
-        return $localRoute;
-    }
-
-    /**
-     * Build a download response for a track: presign an S3 GET that forces
-     * Content-Disposition: attachment with the original filename, or fall back
-     * to a streamed file download on a local disk.
-     */
-    public function downloadResponse(Track $track): SymfonyResponse
-    {
-        $filename = $track->original_name ?: ('track-'.$track->id.'.wav');
-
-        if ($this->isS3()) {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl(
-                $track->s3_key,
-                now()->addMinutes(15),
-                [
-                    'ResponseContentDisposition' => 'attachment; filename="'.addslashes($filename).'"',
-                    'ResponseContentType' => $track->mime ?: 'audio/wav',
-                ],
-            ));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($track->s3_key), 404);
-
-        return response()->download(
-            $disk->path($track->s3_key),
-            $filename,
-            ['Content-Type' => $track->mime ?: 'audio/wav'],
-        );
-    }
-
-    /**
-     * The crossorigin mode the audio element must use for playbackUrl().
-     * Presigned S3 URLs carry no cookies, so they load anonymously; the local
+     * The crossorigin mode the channel audio elements must use. Presigned R2
+     * URLs carry no cookies, so they load anonymously; the in-app channel
      * route is cookie-authenticated and same-origin, so it sends credentials.
      * Either way the source is CORS-clean, so per-channel mixing can run.
      */
@@ -165,10 +83,10 @@ class TrackStorage
     }
 
     /**
-     * The storage key for a track's peaks envelope. Lives alongside the WAV in
-     * the same per-user namespace (so ownership is still derivable from the key
-     * prefix) and is generated deterministically from the WAV key so a deleted
-     * track always cleans up the right sibling.
+     * Storage key for the (legacy, pre-transcode) sibling peaks JSON. Still
+     * referenced by Track destroy() to clean up artifacts of a track that was
+     * deleted before the transcode finished — once a track has channel rows,
+     * its s3_key is null and this method isn't called.
      */
     public function peaksKey(Track $track): string
     {
@@ -178,51 +96,6 @@ class TrackStorage
     public function peaksKeyFor(string $wavKey): string
     {
         return preg_replace('/\.wav$/i', '.peaks.json', $wavKey);
-    }
-
-    /**
-     * The URL the mixer fetches peaks from. Mirrors playbackUrl(): on S3 the
-     * owner gets a presigned object URL baked into the page (CORS-clean for
-     * the in-page fetch); a shared viewer always uses the given in-app route
-     * so revoking a share token kills peak access too. Local disks always use
-     * the route. Returns null until the peaks file exists.
-     */
-    public function peaksUrl(Track $track, string $localRoute, bool $shared = false): ?string
-    {
-        // The legacy single-track peaks JSON lived alongside the source WAV.
-        // After transcoding, peaks are per-channel and live on TrackChannel
-        // rows — callers should read them from there.
-        if ($track->s3_key === null) {
-            return null;
-        }
-
-        if ($this->isS3() && ! $shared) {
-            return $this->disk()->temporaryUrl($this->peaksKey($track), now()->addHours(6));
-        }
-
-        return $localRoute;
-    }
-
-    /**
-     * Build a response that serves the peaks JSON: redirects to a short-lived
-     * presigned URL on S3, or streams the file on a local disk. Used by both
-     * the auth'd and shared peaks routes.
-     */
-    public function peaksResponse(Track $track): SymfonyResponse
-    {
-        $key = $this->peaksKey($track);
-
-        if ($this->isS3()) {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl($key, now()->addMinutes(30)));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($key), 404);
-
-        return response()->file($disk->path($key), ['Content-Type' => 'application/json']);
     }
 
     /**
