@@ -74,8 +74,17 @@ const levels = ref([]);
 const pans = ref([]);
 const muted = ref([]);
 const soloed = ref([]);
+// Per-channel preamp trim in dB (0, 5, 10, 15, 20). Click cycles in 5 dB steps;
+// applied before the fader so a quiet recording can be lifted into a range
+// where 0–100% of the fader actually does something useful.
+const boosts = ref([]);
+const BOOST_STEPS = [0, 5, 10, 15, 20];
+const BOOST_MAX = 20;
 const labels = ref([]);
 const mixerUnavailable = ref(false);
+
+// Convert dB to a linear gain multiplier: 0 dB -> 1, +6 dB -> ~2, +20 dB -> 10.
+const dbToLinear = (db) => Math.pow(10, (db || 0) / 20);
 
 // Saved channel-name templates the user can apply to this (or any) track.
 const templateList = ref([...props.templates]);
@@ -180,6 +189,7 @@ const setupMixer = (audioEl, channels, corsOk) => {
         pans.value = Array.from({ length: channels }, (_, i) => saved?.[i]?.pan ?? 0);
         muted.value = Array.from({ length: channels }, (_, i) => !!saved?.[i]?.muted);
         soloed.value = Array.from({ length: channels }, (_, i) => !!saved?.[i]?.solo);
+        boosts.value = Array.from({ length: channels }, (_, i) => Number(saved?.[i]?.boost ?? 0));
         labels.value = Array.from({ length: channels }, (_, i) => props.track.channel_labels?.[i] ?? '');
 
         // Push the seeded state into the audio graph directly (instantaneous,
@@ -187,7 +197,8 @@ const setupMixer = (audioEl, channels, corsOk) => {
         const anySolo = soloed.value.some(Boolean);
         for (let i = 0; i < channels; i++) {
             const audible = (!anySolo || soloed.value[i]) && !muted.value[i];
-            gainNodes[i].gain.value = audible ? levels.value[i] / 100 : 0;
+            const trim = dbToLinear(boosts.value[i]);
+            gainNodes[i].gain.value = audible ? (levels.value[i] / 100) * trim : 0;
             panners[i].pan.value = pans.value[i] / 100;
         }
     } catch (e) {
@@ -207,8 +218,16 @@ const channelAudible = (i) => {
 const applyGain = (i) => {
     const node = gainNodes[i];
     if (!node || !audioCtx) return;
-    const value = channelAudible(i) ? levels.value[i] / 100 : 0;
+    const trim = dbToLinear(boosts.value[i]);
+    const value = channelAudible(i) ? (levels.value[i] / 100) * trim : 0;
     node.gain.setTargetAtTime(value, audioCtx.currentTime, 0.015);
+};
+
+const adjustBoost = (i, delta) => {
+    const next = Math.max(0, Math.min(BOOST_MAX, (boosts.value[i] || 0) + delta));
+    if (next === boosts.value[i]) return;
+    boosts.value[i] = next;
+    applyGain(i);
 };
 
 // Flipping any channel's solo changes which other channels are audible, so
@@ -343,6 +362,7 @@ const saveDefaultMix = async () => {
             pan: pans.value[i] ?? 0,
             muted: !!muted.value[i],
             solo: !!soloed.value[i],
+            boost: boosts.value[i] ?? 0,
         }));
         const res = await apiFetch(route('tracks.update', props.track.id), {
             method: 'PATCH',
@@ -383,6 +403,7 @@ const applyMixSource = (source) => {
         pans.value[i] = entry.pan ?? 0;
         muted.value[i] = !!entry.muted;
         soloed.value[i] = !!entry.solo;
+        boosts.value[i] = Number(entry.boost ?? 0);
         applyPan(i);
     }
     applyAllGains();
@@ -764,6 +785,7 @@ onBeforeUnmount(() => {
     analysers = [];
     pans.value = [];
     soloed.value = [];
+    boosts.value = [];
     meterLevels.value = [];
     labels.value = [];
     labelInputs = [];
@@ -947,6 +969,26 @@ onBeforeUnmount(() => {
                             }"
                         >
                             <span class="fader-val">{{ muted[i] ? 'muted' : `${lvl}%` }}</span>
+                            <div class="trim" :class="{ active: (boosts[i] || 0) > 0 }">
+                                <button
+                                    type="button"
+                                    class="trim-step"
+                                    :disabled="(boosts[i] || 0) <= 0"
+                                    :aria-label="`Decrease trim for ${channelLabel(i, levels.length)}`"
+                                    @click="adjustBoost(i, -5)"
+                                >−</button>
+                                <span
+                                    class="trim-val"
+                                    :title="`Preamp trim: +${boosts[i] || 0} dB`"
+                                >+{{ boosts[i] || 0 }}</span>
+                                <button
+                                    type="button"
+                                    class="trim-step"
+                                    :disabled="(boosts[i] || 0) >= BOOST_MAX"
+                                    :aria-label="`Increase trim for ${channelLabel(i, levels.length)}`"
+                                    @click="adjustBoost(i, 5)"
+                                >+</button>
+                            </div>
                             <div class="fader-stack">
                                 <div class="meter" :aria-hidden="true">
                                     <div class="meter-fill" :style="{ height: ((meterLevels[i] || 0) * 100) + '%' }" />
@@ -1165,6 +1207,65 @@ onBeforeUnmount(() => {
 }
 .fader:hover .fader-val, .fader:focus-within .fader-val { visibility: visible; }
 .fader.muted .fader-val { visibility: visible; color: var(--p-red-500); }
+
+/* Per-channel preamp trim. Sits at the top of the channel strip like the GAIN
+   knob on a hardware mixer. Reads "+0" when unboosted (subtle); turns amber
+   when active to make it obvious a channel is being lifted. */
+.trim {
+    display: inline-grid;
+    grid-template-columns: 1.25rem auto 1.25rem;
+    align-items: stretch;
+    border: 1px solid var(--p-content-border-color);
+    border-radius: 5px;
+    overflow: hidden;
+    background: var(--p-content-background);
+    transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+    /* Breathing room before the fader slot below — keep the preamp visually
+       distinct from the fader as on a hardware channel strip. */
+    margin-bottom: 0.5rem;
+}
+.trim.active {
+    background: #fde68a;
+    border-color: #b45309;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.45);
+}
+.trim-step {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--p-text-color);
+    font-size: 0.8125rem;
+    font-weight: 700;
+    line-height: 1;
+    padding: 0.2rem 0;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+}
+.trim-step:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--p-primary-color) 18%, transparent);
+    color: var(--p-primary-color);
+}
+.trim-step:disabled {
+    color: var(--p-text-muted-color);
+    opacity: 0.4;
+    cursor: default;
+}
+.trim.active .trim-step { color: #1f2937; }
+.trim.active .trim-step:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.08);
+    color: #1f2937;
+}
+.trim-val {
+    font-size: 0.6875rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--p-text-muted-color);
+    padding: 0 0.35rem;
+    align-self: center;
+    line-height: 1;
+    user-select: none;
+}
+.trim.active .trim-val { color: #1f2937; }
 
 .fader-stack {
     display: flex; align-items: stretch; justify-content: center; gap: 12px; height: 160px;
@@ -1503,6 +1604,8 @@ onBeforeUnmount(() => {
     /* Pan is rarely needed on a phone and crowds the row — drop it entirely.
        Saved values are preserved server-side and reappear on a wider screen. */
     .fader.is-horizontal .pan { display: none; }
+    /* Same for the preamp trim — desktop-only control. */
+    .fader.is-horizontal .trim { display: none; }
 }
 
 .mini-transport {

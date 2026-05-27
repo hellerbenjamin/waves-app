@@ -147,12 +147,22 @@ class TrackController extends Controller
             $channels = (int) $track->channels_count;
             $changes['default_mix'] = $data['default_mix'] === null ? null : collect($data['default_mix'])
                 ->take($channels)
-                ->map(fn ($entry) => [
-                    'level' => (int) round(max(0, min(100, (float) $entry['level']))),
-                    'pan' => (int) round(max(-100, min(100, (float) $entry['pan']))),
-                    'muted' => (bool) $entry['muted'],
-                    'solo' => (bool) ($entry['solo'] ?? false),
-                ])
+                ->map(function ($entry) {
+                    // Per-channel preamp trim in dB, snapped to 5 dB steps in
+                    // [0, 20] — there's a real risk of clipping above that, and
+                    // a quiet track usually only needs +5–+15 to put the fader
+                    // back in a useful range.
+                    $boost = (int) round(((float) ($entry['boost'] ?? 0)) / 5) * 5;
+                    $boost = max(0, min(20, $boost));
+
+                    return [
+                        'level' => (int) round(max(0, min(100, (float) $entry['level']))),
+                        'pan' => (int) round(max(-100, min(100, (float) $entry['pan']))),
+                        'muted' => (bool) $entry['muted'],
+                        'solo' => (bool) ($entry['solo'] ?? false),
+                        'boost' => $boost,
+                    ];
+                })
                 ->all();
         }
 
