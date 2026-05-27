@@ -102,7 +102,6 @@ Route::middleware('auth')->group(function () {
     Route::post('/tracks/multipart/abort', [TrackController::class, 'abortMultipart'])->name('tracks.multipart.abort');
     Route::post('/tracks/cleanup', [TrackController::class, 'cleanup'])->name('tracks.cleanup');
     Route::post('/tracks', [TrackController::class, 'store'])->name('tracks.store');
-    Route::post('/tracks/combine', [TrackController::class, 'combine'])->name('tracks.combine');
     Route::delete('/tracks/{track}', [TrackController::class, 'destroy'])->name('tracks.destroy');
     Route::post('/tracks/{track}/share', [TrackController::class, 'share'])->name('tracks.share');
     Route::delete('/tracks/{track}/share', [TrackController::class, 'unshare'])->name('tracks.unshare');

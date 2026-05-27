@@ -5,7 +5,6 @@ namespace App\Http\Controllers;
 use App\Http\Requests\StoreTrackRequest;
 use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
-use App\Jobs\CombineTracks;
 use App\Jobs\ExtractPeaks;
 use App\Models\Track;
 use App\Services\TrackStorage;
@@ -372,88 +371,6 @@ class TrackController extends Controller
 
         // Stay on whichever page the upload came from (track list or an event).
         return back();
-    }
-
-    /**
-     * Stitch ≥2 of the owner's tracks into one new track, in the order the
-     * client passes. The user picked "delete originals" — that happens inside
-     * the job once the combined output is safely in storage.
-     *
-     * Format-matching is split between layers: sample rate and channel count
-     * are cheap to read from the cached columns we hoisted out of the peaks
-     * envelope at extract time, so we reject mismatches here before queueing.
-     * Bit-depth lives only in the WAV header and is verified inside the job
-     * (with ffprobe) just before concat.
-     */
-    public function combine(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'track_ids' => ['required', 'array', 'min:2'],
-            'track_ids.*' => ['integer', 'distinct'],
-            'name' => ['required', 'string', 'max:255'],
-            'event_id' => ['nullable', 'integer'],
-        ]);
-
-        $user = $request->user();
-
-        $tracks = $user->tracks()
-            ->whereIn('id', $validated['track_ids'])
-            ->get()
-            ->keyBy('id');
-
-        // Same count means every id was found and owned. Anything missing
-        // either belongs to someone else or doesn't exist.
-        abort_unless($tracks->count() === count($validated['track_ids']), 404, 'One or more tracks not found.');
-
-        $ordered = collect($validated['track_ids'])->map(fn ($id) => $tracks->get($id));
-
-        // Peaks must be ready on every source — without them we don't have a
-        // cheap channel/sample-rate to validate against, and a not-yet-decoded
-        // upload is also not safe to concat (its bytes may still be in flight).
-        $missingPeaks = $ordered->first(fn (Track $t) => ! $t->peaks_ready);
-        if ($missingPeaks) {
-            return response()->json([
-                'message' => "\"{$missingPeaks->original_name}\" is still processing — wait for its waveform before combining.",
-            ], 422);
-        }
-
-        $first = $ordered->first();
-        $firstChannels = (int) $first->channels_count;
-        $firstRate = (int) $first->sample_rate;
-
-        foreach ($ordered as $track) {
-            $channels = (int) $track->channels_count;
-            $rate = (int) $track->sample_rate;
-
-            if ($channels !== $firstChannels || $rate !== $firstRate) {
-                return response()->json([
-                    'message' => "\"{$track->original_name}\" ({$channels}ch @ {$rate} Hz) doesn't match the first track ({$firstChannels}ch @ {$firstRate} Hz). All tracks must share sample rate, bit depth, and channel count.",
-                ], 422);
-            }
-        }
-
-        // Resolve event_id: an explicit value the user owns, else the common
-        // event of all sources if they happen to share one, else null.
-        $eventId = $validated['event_id'] ?? null;
-        if ($eventId !== null) {
-            abort_unless(
-                $user->events()->whereKey($eventId)->exists(),
-                404,
-                'Event not found.',
-            );
-        } else {
-            $commonEventIds = $ordered->pluck('event_id')->unique();
-            $eventId = $commonEventIds->count() === 1 ? $commonEventIds->first() : null;
-        }
-
-        CombineTracks::dispatch(
-            $user,
-            $ordered->pluck('id')->all(),
-            trim($validated['name']),
-            $eventId,
-        );
-
-        return response()->json(['queued' => $ordered->count()]);
     }
 
     public function destroy(Track $track): RedirectResponse

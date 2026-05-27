@@ -21,7 +21,6 @@ import { typeLabel, typeOptions } from '@/lib/eventTypes';
 import { useS3Upload, apiFetch } from '@/composables/useS3Upload';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
-import CombineTracksDialog from '@/Components/CombineTracksDialog.vue';
 
 const props = defineProps({
     event: { type: Object, required: true },
@@ -87,39 +86,6 @@ const submitEdit = () => {
             preserveScroll: true,
             onSuccess: () => { showEdit.value = false; },
         });
-};
-
-// --- Combine tracks ----------------------------------------------------------
-// Per-row checkboxes (rendered in the track list) drive this set; a Combine
-// button appears in the section head once 2+ are selected. Selection is keyed
-// by track id so a refresh after a successful combine cleanly resets it.
-const selectedTrackIdsForCombine = ref(new Set());
-const showCombineDialog = ref(false);
-
-const toggleCombineSelection = (track) => {
-    const next = new Set(selectedTrackIdsForCombine.value);
-    next.has(track.id) ? next.delete(track.id) : next.add(track.id);
-    selectedTrackIdsForCombine.value = next;
-};
-
-const selectedTracksForCombine = computed(() =>
-    tracks.value.filter((t) => selectedTrackIdsForCombine.value.has(t.id))
-);
-
-const openCombine = () => {
-    if (selectedTracksForCombine.value.length < 2) return;
-    showCombineDialog.value = true;
-};
-
-const onCombineDone = () => {
-    selectedTrackIdsForCombine.value = new Set();
-    refresh();
-    toast?.add({
-        severity: 'success',
-        summary: 'Combine queued',
-        detail: 'The combined track will appear once the job finishes.',
-        life: 4000,
-    });
 };
 
 const confirmDeleteEvent = () => confirm.require({
@@ -314,14 +280,6 @@ const openLightbox = (item) => { lightbox.value = item; };
         @upload-whole="onTrackSplitUploadWhole"
         @cancel="onTrackSplitCancel"
     />
-    <CombineTracksDialog
-        v-if="canEdit"
-        v-model:visible="showCombineDialog"
-        :tracks="selectedTracksForCombine"
-        :event-id="event.id"
-        @done="onCombineDone"
-    />
-
     <component :is="Layout">
         <template #header>
             <div class="header">
@@ -357,13 +315,6 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <template v-if="canEdit">
                         <!-- Hidden file picker; the visible "Upload a track" button lives below. -->
                         <input ref="trackInput" type="file" accept=".wav,audio/wav" multiple style="display:none" @change="onTrackSelected" />
-                        <Button
-                            v-if="selectedTracksForCombine.length >= 2"
-                            :label="`Combine ${selectedTracksForCombine.length}`"
-                            icon="pi pi-link"
-                            size="small"
-                            @click="openCombine"
-                        />
                         <Button v-if="assignableTracks.length" icon="pi pi-plus" label="Add existing" size="small" text @click="showAddTracks = true" />
                     </template>
                 </div>
@@ -390,14 +341,6 @@ const openLightbox = (item) => { lightbox.value = item; };
                         <div class="track-list">
                             <div v-for="(track, i) in tracks" :key="track.id" class="track-row">
                                 <div class="track-head">
-                                    <input
-                                        v-if="canEdit"
-                                        type="checkbox"
-                                        class="track-pick"
-                                        :checked="selectedTrackIdsForCombine.has(track.id)"
-                                        :aria-label="`Select ${track.name} for combine`"
-                                        @change="toggleCombineSelection(track)"
-                                    />
                                     <span class="track-num">{{ i + 1 }}</span>
                                     <Link :href="track.show_url" class="track-link">{{ track.name }}</Link>
                                     <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
@@ -573,7 +516,6 @@ const openLightbox = (item) => { lightbox.value = item; };
 .track-list { display: flex; flex-direction: column; gap: 1rem; }
 .track-row { display: flex; flex-direction: column; gap: 0.4rem; }
 .track-head { display: flex; align-items: center; gap: 0.6rem; }
-.track-pick { flex: 0 0 auto; width: 1rem; height: 1rem; accent-color: var(--p-primary-color); cursor: pointer; }
 .track-num { flex: 0 0 auto; width: 1.4rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--p-text-muted-color); font-size: 0.85rem; }
 .track-link { flex: 1 1 auto; min-width: 0; color: var(--p-primary-color); text-decoration: none; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-link:hover { text-decoration: underline; }

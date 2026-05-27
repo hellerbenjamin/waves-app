@@ -19,7 +19,6 @@ import { useConfirm } from 'primevue/useconfirm';
 import Uppy from '@uppy/core';
 import AwsS3 from '@uppy/aws-s3';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
-import CombineTracksDialog from '@/Components/CombineTracksDialog.vue';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
 
 defineProps({
@@ -267,27 +266,6 @@ const openRename = (track) => {
     showRenameDialog.value = true;
 };
 
-// Combine: DataTable's built-in multi-select drives a "Combine N" action that
-// opens the shared dialog. Selection is cleared after a successful combine.
-const selectedTracks = ref([]);
-const showCombineDialog = ref(false);
-
-const openCombine = () => {
-    if (selectedTracks.value.length < 2) return;
-    showCombineDialog.value = true;
-};
-
-const onCombineDone = () => {
-    selectedTracks.value = [];
-    router.reload({ only: ['tracks'], preserveScroll: true });
-    toast.add({
-        severity: 'success',
-        summary: 'Combine queued',
-        detail: 'The combined track will appear once the job finishes.',
-        life: 4000,
-    });
-};
-
 const submitRename = async () => {
     const name = renameValue.value.trim();
     if (!name || renameBusy.value) return;
@@ -326,12 +304,6 @@ const submitRename = async () => {
         @upload-whole="onSplitUploadWhole"
         @cancel="onSplitCancel"
     />
-    <CombineTracksDialog
-        v-model:visible="showCombineDialog"
-        :tracks="selectedTracks"
-        @done="onCombineDone"
-    />
-
     <AuthenticatedLayout>
         <template #header>
             <div class="header-row">
@@ -363,20 +335,11 @@ const submitRename = async () => {
 
             <Card v-else>
                 <template #content>
-                    <div v-if="selectedTracks.length >= 2" class="bulk-actions">
-                        <span>{{ selectedTracks.length }} tracks selected</span>
-                        <Button label="Combine…" icon="pi pi-link" size="small" @click="openCombine" />
-                        <Button label="Clear" text size="small" severity="secondary" @click="selectedTracks = []" />
-                    </div>
                     <DataTable
-                        v-model:selection="selectedTracks"
                         :value="tracks"
                         data-key="id"
-                        selection-mode="multiple"
-                        :meta-key-selection="false"
                         stripedRows
                     >
-                        <Column selection-mode="multiple" header-style="width:3rem" />
                         <Column header="Name">
                             <template #body="{ data }">
                                 <Link :href="route('tracks.show', data.id)" class="track-link">{{ data.name }}</Link>
@@ -450,17 +413,6 @@ const submitRename = async () => {
 .upload-row { display: flex; flex-direction: column; gap: 0.375rem; }
 .upload-name { display: flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; }
 .event-select { width: 100%; }
-.bulk-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem 0.75rem;
-    margin-bottom: 0.75rem;
-    border-radius: 0.5rem;
-    background: var(--p-highlight-background);
-    color: var(--p-highlight-color);
-    font-size: 0.875rem;
-}
 .track-link { color: var(--p-primary-color); text-decoration: none; font-weight: 500; }
 .track-link:hover { text-decoration: underline; }
 .rename-dialog { display: flex; flex-direction: column; gap: 0.5rem; }
