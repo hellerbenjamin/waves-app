@@ -53,17 +53,18 @@ class TrackTest extends TestCase
             ->assertForbidden();
     }
 
-    public function test_show_renders_a_transcoded_track_as_ready_with_null_legacy_stream(): void
+    public function test_show_renders_a_transcoded_track_with_per_channel_stream_urls(): void
     {
         $user = User::factory()->create();
         $track = Track::factory()->for($user)->withChannels()->create(['original_name' => 'mix.wav']);
 
-        // Transcoded tracks no longer carry a single-WAV stream URL — playback
-        // is per-channel. The legacy stream_url/peaks_url fields stay in the
-        // payload until the player consumes channels instead, but they resolve
-        // to null once s3_key is cleared. No presign should happen.
+        // Owner pages presign each channel's Opus + peaks URL directly so the
+        // player consumes them off-origin (CORS-clean). 1 channel × (opus +
+        // peaks) → 2 presigns.
         $disk = Mockery::mock(AwsS3V3Adapter::class);
-        $disk->shouldNotReceive('temporaryUrl');
+        $disk->shouldReceive('temporaryUrl')
+            ->twice()
+            ->andReturn('https://s3.example/ch0-opus', 'https://s3.example/ch0-peaks');
         Storage::shouldReceive('disk')->andReturn($disk);
 
         $this->actingAs($user)
@@ -75,8 +76,8 @@ class TrackTest extends TestCase
                 ->where('track.name', 'mix.wav')
                 ->where('track.ready', true)
                 ->where('track.channels_count', 1)
-                ->where('track.stream_url', null)
-                ->where('track.peaks_url', null)
+                ->has('track.channels', 1)
+                ->where('track.channels.0.index', 0)
                 ->where('track.stream_cross_origin', 'anonymous') // s3 disk in tests
             );
     }
@@ -151,44 +152,54 @@ class TrackTest extends TestCase
             ->assertJsonValidationErrors('channel_labels');
     }
 
-    public function test_stream_403s_for_other_users_track(): void
+    public function test_channel_stream_403s_for_other_users_track(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for(User::factory())->create();
+        $track = Track::factory()->for(User::factory())->withChannels()->create();
 
         $this->actingAs($user)
-            ->get("/tracks/{$track->id}/stream")
+            ->get("/tracks/{$track->id}/channels/0/stream")
             ->assertForbidden();
     }
 
-    public function test_stream_redirects_to_temporary_url_on_s3(): void
+    public function test_channel_stream_redirects_to_temporary_url_on_s3(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
         $disk = Mockery::mock(AwsS3V3Adapter::class);
         $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed-stream');
         Storage::shouldReceive('disk')->andReturn($disk);
 
         $this->actingAs($user)
-            ->get("/tracks/{$track->id}/stream")
+            ->get("/tracks/{$track->id}/channels/0/stream")
             ->assertRedirect('https://s3.example/signed-stream');
     }
 
-    public function test_stream_serves_file_on_local_disk(): void
+    public function test_channel_stream_serves_file_on_local_disk(): void
     {
         config(['filesystems.tracks_disk' => 'local']);
         Storage::fake('local');
 
         $user = User::factory()->create();
-        $key = "users/{$user->id}/play.wav";
-        Storage::disk('local')->put($key, 'RIFF....WAVEfake');
-        $track = Track::factory()->for($user)->create(['s3_key' => $key, 'mime' => 'audio/wav']);
+        $track = Track::factory()->for($user)->withChannels()->create();
+        $channel = $track->channels()->first();
+        Storage::disk('local')->put($channel->s3_key, 'fake-opus');
 
-        $response = $this->actingAs($user)->get("/tracks/{$track->id}/stream");
+        $response = $this->actingAs($user)->get("/tracks/{$track->id}/channels/0/stream");
 
         $response->assertOk();
-        $this->assertSame('audio/wav', $response->headers->get('Content-Type'));
+        $this->assertSame('audio/webm', $response->headers->get('Content-Type'));
+    }
+
+    public function test_channel_stream_404s_for_unknown_channel_index(): void
+    {
+        $user = User::factory()->create();
+        $track = Track::factory()->for($user)->withChannels()->create(); // 1 channel
+
+        $this->actingAs($user)
+            ->get("/tracks/{$track->id}/channels/99/stream")
+            ->assertNotFound();
     }
 
     public function test_upload_url_rejects_non_wav_filename(): void

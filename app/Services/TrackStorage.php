@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Track;
+use App\Models\TrackChannel;
 use App\Models\User;
 use App\Services\Concerns\InteractsWithS3;
 use Illuminate\Filesystem\AwsS3V3Adapter;
@@ -222,5 +223,73 @@ class TrackStorage
         abort_unless($disk->exists($key), 404);
 
         return response()->file($disk->path($key), ['Content-Type' => 'application/json']);
+    }
+
+    /**
+     * Owner page: presigned per-channel Opus URL (CORS-clean for the mixer,
+     * baked into the page). Shared/local pages always go through the in-app
+     * stream route so a revoked share token instantly stops working.
+     */
+    public function channelStreamUrl(TrackChannel $channel, string $localRoute, bool $shared = false): string
+    {
+        if ($this->isS3() && ! $shared) {
+            return $this->disk()->temporaryUrl($channel->s3_key, now()->addHours(6));
+        }
+
+        return $localRoute;
+    }
+
+    /** Same rules as {@see channelStreamUrl}, applied to the channel's peaks JSON. */
+    public function channelPeaksUrl(TrackChannel $channel, string $localRoute, bool $shared = false): ?string
+    {
+        if ($channel->peaks_s3_key === null) {
+            return null;
+        }
+
+        if ($this->isS3() && ! $shared) {
+            return $this->disk()->temporaryUrl($channel->peaks_s3_key, now()->addHours(6));
+        }
+
+        return $localRoute;
+    }
+
+    /**
+     * Build the playback response for a single channel's Opus stream. Mirrors
+     * {@see streamResponse}: presign-and-redirect on S3, range-aware file on
+     * local. Content-Type is fixed to audio/webm — the encoder we run in the
+     * transcode job emits WebM-containerised Opus.
+     */
+    public function channelStreamResponse(TrackChannel $channel): SymfonyResponse
+    {
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl($channel->s3_key, now()->addMinutes(30)));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($channel->s3_key), 404);
+
+        return response()->file($disk->path($channel->s3_key), [
+            'Content-Type' => 'audio/webm',
+        ]);
+    }
+
+    public function channelPeaksResponse(TrackChannel $channel): SymfonyResponse
+    {
+        abort_if($channel->peaks_s3_key === null, 404);
+
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl($channel->peaks_s3_key, now()->addMinutes(30)));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($channel->peaks_s3_key), 404);
+
+        return response()->file($disk->path($channel->peaks_s3_key), ['Content-Type' => 'application/json']);
     }
 }

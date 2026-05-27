@@ -7,6 +7,7 @@ use App\Http\Requests\UpdateTrackRequest;
 use App\Http\Requests\UploadUrlRequest;
 use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Track;
+use App\Models\TrackChannel;
 use App\Services\TrackStorage;
 use App\Support\TrackPresenter;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
@@ -61,6 +62,7 @@ class TrackController extends Controller
     public function show(Request $request, Track $track): Response
     {
         $this->authorize('view', $track);
+        $track->load('channels');
 
         return Inertia::render('Tracks/Show', [
             'canEdit' => true,
@@ -74,8 +76,8 @@ class TrackController extends Controller
             'track' => array_merge(
                 $this->presenter->show(
                     $track,
-                    route('tracks.stream', $track->id),
-                    route('tracks.peaks', $track->id),
+                    fn (TrackChannel $c) => route('tracks.channels.stream', [$track->id, $c->channel_index]),
+                    fn (TrackChannel $c) => route('tracks.channels.peaks', [$track->id, $c->channel_index]),
                     shared: false,
                 ),
                 ['share_url' => $track->share_token ? route('tracks.shared', $track->share_token) : null],
@@ -85,13 +87,15 @@ class TrackController extends Controller
 
     public function showShared(Track $track): Response
     {
+        $track->load('channels');
+
         return Inertia::render('Tracks/Show', [
             'canEdit' => false,
             'templates' => [],
             'track' => $this->presenter->show(
                 $track,
-                route('tracks.shared-stream', $track->share_token),
-                route('tracks.shared-peaks', $track->share_token),
+                fn (TrackChannel $c) => route('tracks.shared-channels.stream', [$track->share_token, $c->channel_index]),
+                fn (TrackChannel $c) => route('tracks.shared-channels.peaks', [$track->share_token, $c->channel_index]),
                 shared: true,
             ),
         ]);
@@ -176,13 +180,6 @@ class TrackController extends Controller
         ]);
     }
 
-    public function stream(Track $track): SymfonyResponse
-    {
-        $this->authorize('view', $track);
-
-        return $this->storage->streamResponse($track);
-    }
-
     public function download(Track $track): SymfonyResponse
     {
         $this->authorize('view', $track);
@@ -190,21 +187,42 @@ class TrackController extends Controller
         return $this->storage->downloadResponse($track);
     }
 
-    public function streamShared(Track $track): SymfonyResponse
-    {
-        return $this->storage->streamResponse($track);
-    }
-
-    public function peaks(Track $track): SymfonyResponse
+    /**
+     * Stream a single transcoded Opus channel of an authed-user-owned track.
+     * The channel lookup is by `(track_id, channel_index)` rather than the
+     * row's own PK so the URL stays opaque to the storage layout.
+     */
+    public function streamChannel(Track $track, int $channel): SymfonyResponse
     {
         $this->authorize('view', $track);
 
-        return $this->storage->peaksResponse($track);
+        return $this->storage->channelStreamResponse($this->channelOr404($track, $channel));
     }
 
-    public function peaksShared(Track $track): SymfonyResponse
+    public function peaksChannel(Track $track, int $channel): SymfonyResponse
     {
-        return $this->storage->peaksResponse($track);
+        $this->authorize('view', $track);
+
+        return $this->storage->channelPeaksResponse($this->channelOr404($track, $channel));
+    }
+
+    /** Channel stream for a per-track public share link — token-bound, no auth. */
+    public function streamSharedChannel(Track $track, int $channel): SymfonyResponse
+    {
+        return $this->storage->channelStreamResponse($this->channelOr404($track, $channel));
+    }
+
+    public function peaksSharedChannel(Track $track, int $channel): SymfonyResponse
+    {
+        return $this->storage->channelPeaksResponse($this->channelOr404($track, $channel));
+    }
+
+    private function channelOr404(Track $track, int $channelIndex): TrackChannel
+    {
+        $channel = $track->channels()->where('channel_index', $channelIndex)->first();
+        abort_unless($channel !== null, 404);
+
+        return $channel;
     }
 
     /**

@@ -107,27 +107,27 @@ class ProfileShareTest extends TestCase
         $this->get("/u/{$user->share_token}/events/{$foreign->id}")->assertNotFound();
     }
 
-    public function test_track_stream_redirects_for_owned_track_on_s3(): void
+    public function test_channel_stream_redirects_for_owned_track_on_s3(): void
     {
         $user = User::factory()->create(['share_token' => Str::random(32)]);
         $event = Event::factory()->for($user)->create();
-        $track = Track::factory()->for($user)->create(['event_id' => $event->id]);
+        $track = Track::factory()->for($user)->withChannels()->create(['event_id' => $event->id]);
 
         $disk = Mockery::mock(AwsS3V3Adapter::class);
         $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed');
         Storage::shouldReceive('disk')->andReturn($disk);
 
-        $this->get("/u/{$user->share_token}/events/{$event->id}/tracks/{$track->id}/stream")
+        $this->get("/u/{$user->share_token}/events/{$event->id}/tracks/{$track->id}/channels/0/stream")
             ->assertRedirect('https://s3.example/signed');
     }
 
-    public function test_track_stream_404s_when_track_not_in_event(): void
+    public function test_channel_stream_404s_when_track_not_in_event(): void
     {
         $user = User::factory()->create(['share_token' => Str::random(32)]);
         $event = Event::factory()->for($user)->create();
-        $track = Track::factory()->for($user)->create(); // not in the event
+        $track = Track::factory()->for($user)->withChannels()->create(); // not in the event
 
-        $this->get("/u/{$user->share_token}/events/{$event->id}/tracks/{$track->id}/stream")
+        $this->get("/u/{$user->share_token}/events/{$event->id}/tracks/{$track->id}/channels/0/stream")
             ->assertNotFound();
     }
 

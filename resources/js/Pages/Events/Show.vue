@@ -388,7 +388,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                                     <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
                                     <Button v-if="canEdit" icon="pi pi-times" severity="secondary" text rounded size="small" aria-label="Remove from event" @click="removeTrack(track)" />
                                 </div>
-                                <Tag v-if="!track.stream_url" severity="warn" value="Processing" />
+                                <Tag v-if="!track.ready" severity="warn" value="Processing" />
                             </div>
                         </div>
                     </template>
