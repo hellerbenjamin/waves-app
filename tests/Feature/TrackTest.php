@@ -2,15 +2,11 @@
 
 namespace Tests\Feature;
 
-use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Event;
 use App\Models\Track;
 use App\Models\User;
-use Aws\Result;
-use Aws\S3\S3Client;
 use Illuminate\Filesystem\AwsS3V3Adapter;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Storage;
 use Mockery;
 use Tests\TestCase;
@@ -202,135 +198,111 @@ class TrackTest extends TestCase
             ->assertNotFound();
     }
 
-    public function test_upload_url_rejects_non_wav_filename(): void
-    {
-        $user = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/upload-url', [
-                'filename' => 'song.mp3',
-                'size' => 1024,
-                'content_type' => 'audio/wav',
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('filename');
-    }
-
-    public function test_upload_url_rejects_oversize(): void
-    {
-        $user = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/upload-url', [
-                'filename' => 'song.wav',
-                'size' => 5_368_709_121, // 5GB + 1: over the single-PUT limit
-                'content_type' => 'audio/wav',
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('size');
-    }
-
-    public function test_upload_url_rejects_bad_content_type(): void
-    {
-        $user = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/upload-url', [
-                'filename' => 'song.wav',
-                'size' => 1024,
-                'content_type' => 'audio/mpeg',
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('content_type');
-    }
-
-    public function test_upload_url_returns_signed_data_scoped_to_user(): void
+    public function test_init_channels_returns_presigned_targets_scoped_to_user(): void
     {
         $user = User::factory()->create();
 
         $disk = Mockery::mock(AwsS3V3Adapter::class);
+        // 2 channels × (opus + peaks) = 4 presigns.
         $disk->shouldReceive('temporaryUploadUrl')
-            ->once()
-            ->andReturn([
-                'url' => 'https://s3.example/signed',
-                'headers' => ['Content-Type' => 'audio/wav'],
-            ]);
-        Storage::shouldReceive('disk')->with('s3')->andReturn($disk);
+            ->times(4)
+            ->andReturn(['url' => 'https://s3.example/put', 'headers' => []]);
+        Storage::shouldReceive('disk')->andReturn($disk);
 
         $response = $this->actingAs($user)
-            ->postJson('/tracks/upload-url', [
-                'filename' => 'song.wav',
-                'size' => 1024,
-                'content_type' => 'audio/wav',
-            ])
+            ->postJson('/tracks/channels/init', ['channels' => 2])
             ->assertOk()
-            ->assertJsonStructure(['url', 'headers', 's3_key']);
+            ->assertJsonStructure([
+                'group',
+                'targets' => [['index', 'opus_key', 'opus' => ['url', 'headers'], 'peaks_key', 'peaks' => ['url', 'headers']]],
+            ]);
 
-        $this->assertStringStartsWith("users/{$user->id}/", $response->json('s3_key'));
-        $this->assertStringEndsWith('.wav', $response->json('s3_key'));
+        $this->assertCount(2, $response->json('targets'));
+        foreach ($response->json('targets') as $target) {
+            $this->assertStringStartsWith("users/{$user->id}/", $target['opus_key']);
+            $this->assertStringStartsWith("users/{$user->id}/", $target['peaks_key']);
+            $this->assertStringEndsWith('.webm', $target['opus_key']);
+            $this->assertStringEndsWith('.peaks.json', $target['peaks_key']);
+        }
     }
 
-    public function test_store_rejects_s3_key_belonging_to_other_user(): void
+    public function test_init_channels_rejects_a_zero_channel_count(): void
+    {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)
+            ->postJson('/tracks/channels/init', ['channels' => 0])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('channels');
+    }
+
+    public function test_store_rejects_channel_keys_belonging_to_other_user(): void
     {
         $user = User::factory()->create();
         $other = User::factory()->create();
 
         $this->actingAs($user)
             ->postJson('/tracks', [
-                's3_key' => "users/{$other->id}/abc.wav",
-                'original_name' => 'song.wav',
-                'mime' => 'audio/wav',
-                'size' => 1024,
+                'original_name' => 'song',
+                'duration_seconds' => 12.3,
+                'sample_rate' => 48000,
+                'channels' => [
+                    ['index' => 0, 'opus_key' => "users/{$other->id}/g/ch00.webm", 'peaks_key' => "users/{$other->id}/g/ch00.peaks.json", 'size' => 100],
+                ],
             ])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('s3_key');
+            ->assertJsonValidationErrors(['channels.0.opus_key', 'channels.0.peaks_key']);
     }
 
-    public function test_store_422s_when_object_missing_in_storage(): void
+    public function test_store_422s_when_a_channel_object_is_missing(): void
     {
         $user = User::factory()->create();
         Storage::fake('s3');
-        Bus::fake();
 
         $this->actingAs($user)
             ->postJson('/tracks', [
-                's3_key' => "users/{$user->id}/missing.wav",
-                'original_name' => 'song.wav',
-                'mime' => 'audio/wav',
-                'size' => 1024,
+                'original_name' => 'song',
+                'duration_seconds' => 12.3,
+                'sample_rate' => 48000,
+                'channels' => [
+                    ['index' => 0, 'opus_key' => "users/{$user->id}/g/ch00.webm", 'peaks_key' => "users/{$user->id}/g/ch00.peaks.json", 'size' => 100],
+                ],
             ])
             ->assertStatus(422);
 
         $this->assertDatabaseCount('tracks', 0);
-        Bus::assertNotDispatched(TranscodeTrackToChannels::class);
     }
 
-    public function test_store_creates_track_and_dispatches_peaks_job(): void
+    public function test_store_creates_a_track_and_its_channels_from_uploaded_objects(): void
     {
         $user = User::factory()->create();
         Storage::fake('s3');
-        Bus::fake();
 
-        $key = "users/{$user->id}/abc.wav";
-        Storage::disk('s3')->put($key, 'fake-wav-bytes');
+        $group = 'GROUP1';
+        for ($i = 0; $i < 2; $i++) {
+            Storage::disk('s3')->put("users/{$user->id}/{$group}/ch0{$i}.webm", 'opus');
+            Storage::disk('s3')->put("users/{$user->id}/{$group}/ch0{$i}.peaks.json", '{"peaks":[]}');
+        }
 
         $this->actingAs($user)
             ->post('/tracks', [
-                's3_key' => $key,
-                'original_name' => 'song.wav',
-                'mime' => 'audio/wav',
-                'size' => 14,
+                'original_name' => 'My Song',
+                'duration_seconds' => 200.5,
+                'sample_rate' => 48000,
+                'channels' => [
+                    ['index' => 0, 'label' => 'Kick', 'opus_key' => "users/{$user->id}/{$group}/ch00.webm", 'peaks_key' => "users/{$user->id}/{$group}/ch00.peaks.json", 'size' => 10],
+                    ['index' => 1, 'label' => 'Snare', 'opus_key' => "users/{$user->id}/{$group}/ch01.webm", 'peaks_key' => "users/{$user->id}/{$group}/ch01.peaks.json", 'size' => 20],
+                ],
             ])
             ->assertRedirect();
 
-        $this->assertDatabaseHas('tracks', [
-            'user_id' => $user->id,
-            's3_key' => $key,
-            'original_name' => 'song.wav',
-            'size' => 14,
-        ]);
-
-        Bus::assertDispatched(TranscodeTrackToChannels::class, fn ($job) => $job->track->s3_key === $key);
+        $track = Track::firstWhere('original_name', 'My Song');
+        $this->assertNotNull($track);
+        $this->assertNull($track->s3_key);
+        $this->assertSame(2, $track->channels_count);
+        $this->assertSame(48000, $track->sample_rate);
+        $this->assertSame(30, $track->size);
+        $this->assertSame(['Kick', 'Snare'], $track->channels()->pluck('label')->all());
     }
 
     public function test_store_assigns_the_track_to_an_owned_event(): void
@@ -338,128 +310,42 @@ class TrackTest extends TestCase
         $user = User::factory()->create();
         $event = Event::factory()->for($user)->create();
         Storage::fake('s3');
-        Bus::fake();
 
-        $key = "users/{$user->id}/in-event.wav";
-        Storage::disk('s3')->put($key, 'fake-wav-bytes');
+        Storage::disk('s3')->put("users/{$user->id}/g/ch00.webm", 'opus');
+        Storage::disk('s3')->put("users/{$user->id}/g/ch00.peaks.json", '{}');
 
         $this->actingAs($user)
             ->post('/tracks', [
-                's3_key' => $key,
-                'original_name' => 'in-event.wav',
-                'mime' => 'audio/wav',
-                'size' => 14,
+                'original_name' => 'in-event',
+                'duration_seconds' => 5,
+                'sample_rate' => 48000,
                 'event_id' => $event->id,
+                'channels' => [
+                    ['index' => 0, 'opus_key' => "users/{$user->id}/g/ch00.webm", 'peaks_key' => "users/{$user->id}/g/ch00.peaks.json", 'size' => 14],
+                ],
             ])
             ->assertRedirect();
 
-        $this->assertDatabaseHas('tracks', ['s3_key' => $key, 'event_id' => $event->id]);
+        $this->assertDatabaseHas('tracks', ['original_name' => 'in-event', 'event_id' => $event->id]);
     }
 
     public function test_store_rejects_event_belonging_to_another_user(): void
     {
         $user = User::factory()->create();
         $othersEvent = Event::factory()->for(User::factory())->create();
-        Storage::fake('s3');
-        Bus::fake();
-
-        $key = "users/{$user->id}/x.wav";
-        Storage::disk('s3')->put($key, 'bytes');
 
         $this->actingAs($user)
             ->postJson('/tracks', [
-                's3_key' => $key,
-                'original_name' => 'x.wav',
-                'mime' => 'audio/wav',
-                'size' => 14,
+                'original_name' => 'x',
+                'duration_seconds' => 5,
+                'sample_rate' => 48000,
                 'event_id' => $othersEvent->id,
+                'channels' => [
+                    ['index' => 0, 'opus_key' => "users/{$user->id}/g/ch00.webm", 'peaks_key' => "users/{$user->id}/g/ch00.peaks.json", 'size' => 14],
+                ],
             ])
             ->assertUnprocessable()
             ->assertJsonValidationErrors('event_id');
-    }
-
-    public function test_create_multipart_returns_upload_id_scoped_to_user(): void
-    {
-        $user = User::factory()->create();
-
-        $client = Mockery::mock(S3Client::class);
-        $client->shouldReceive('createMultipartUpload')->once()->andReturn(new Result(['UploadId' => 'UP123']));
-        $disk = Mockery::mock(AwsS3V3Adapter::class);
-        $disk->shouldReceive('getClient')->andReturn($client);
-        Storage::shouldReceive('disk')->andReturn($disk);
-
-        $response = $this->actingAs($user)
-            ->postJson('/tracks/multipart', ['filename' => 'song.wav', 'size' => 8_000_000_000, 'content_type' => 'audio/wav'])
-            ->assertOk()
-            ->assertJsonStructure(['key', 'uploadId']);
-
-        $this->assertSame('UP123', $response->json('uploadId'));
-        $this->assertStringStartsWith("users/{$user->id}/", $response->json('key'));
-        $this->assertStringEndsWith('.wav', $response->json('key'));
-    }
-
-    public function test_create_multipart_rejects_non_wav_filename(): void
-    {
-        $user = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/multipart', ['filename' => 'song.mp3', 'size' => 1024, 'content_type' => 'audio/wav'])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('filename');
-    }
-
-    public function test_create_multipart_rejects_oversize(): void
-    {
-        $user = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/multipart', [
-                'filename' => 'huge.wav',
-                'size' => 53_687_091_201, // 50GB + 1
-                'content_type' => 'audio/wav',
-            ])
-            ->assertUnprocessable()
-            ->assertJsonValidationErrors('size');
-    }
-
-    public function test_sign_part_rejects_key_belonging_to_other_user(): void
-    {
-        $user = User::factory()->create();
-        $other = User::factory()->create();
-
-        $this->actingAs($user)
-            ->getJson('/tracks/multipart/sign?key=users/'.$other->id.'/x.wav&uploadId=UP1&partNumber=1')
-            ->assertForbidden();
-    }
-
-    public function test_complete_multipart_rejects_key_belonging_to_other_user(): void
-    {
-        $user = User::factory()->create();
-        $other = User::factory()->create();
-
-        $this->actingAs($user)
-            ->postJson('/tracks/multipart/complete', [
-                'key' => "users/{$other->id}/x.wav",
-                'uploadId' => 'UP1',
-                'parts' => [['PartNumber' => 1, 'ETag' => 'abc']],
-            ])
-            ->assertForbidden();
-    }
-
-    public function test_abort_multipart_aborts_upload(): void
-    {
-        $user = User::factory()->create();
-        $key = "users/{$user->id}/abc.wav";
-
-        $client = Mockery::mock(S3Client::class);
-        $client->shouldReceive('abortMultipartUpload')->once();
-        $disk = Mockery::mock(AwsS3V3Adapter::class);
-        $disk->shouldReceive('getClient')->andReturn($client);
-        Storage::shouldReceive('disk')->andReturn($disk);
-
-        $this->actingAs($user)
-            ->postJson('/tracks/multipart/abort', ['key' => $key, 'uploadId' => 'UP1'])
-            ->assertNoContent();
     }
 
     public function test_destroy_403s_for_other_users_track(): void

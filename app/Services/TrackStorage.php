@@ -23,25 +23,49 @@ class TrackStorage
     use InteractsWithS3;
 
     /**
-     * Mint an upload target for a new track. S3 disks return a presigned PUT
-     * URL the browser hits directly; other disks can't presign, so point the
-     * browser at a signed app endpoint that streams the body to disk instead.
+     * Mint the object keys for one track's channel group. The browser encodes
+     * each channel to mono Opus and a peaks envelope locally, then uploads them
+     * straight to these keys; the source WAV never leaves the machine. Keys are
+     * grouped under a shared ULID and owner-scoped so the whole set lives
+     * together and ownership is derivable from the prefix before any Track row
+     * exists.
      *
-     * @return array{url: string, headers: array<string, string>, s3_key: string}
+     * @return array{group:string, channels: list<array{index:int, opus_key:string, peaks_key:string}>}
      */
-    public function uploadTarget(User $user, string $contentType): array
+    public function channelGroupKeys(User $user, int $count): array
     {
-        $key = $this->newTrackKey($user);
+        $group = (string) Str::ulid();
+        $channels = [];
 
+        for ($i = 0; $i < $count; $i++) {
+            $pad = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+            $channels[] = [
+                'index' => $i,
+                'opus_key' => "users/{$user->id}/{$group}/ch{$pad}.webm",
+                'peaks_key' => "users/{$user->id}/{$group}/ch{$pad}.peaks.json",
+            ];
+        }
+
+        return ['group' => $group, 'channels' => $channels];
+    }
+
+    /**
+     * Presign a single direct-to-bucket PUT for an already-minted key. On S3 the
+     * browser PUTs straight to R2; on a local disk it PUTs to a signed app
+     * endpoint that streams the body to disk.
+     *
+     * @return array{url:string, headers:array<string,string>}
+     */
+    public function presignPut(string $key, string $contentType): array
+    {
         if (! $this->isS3()) {
             return [
                 'url' => URL::temporarySignedRoute(
                     'tracks.upload-put',
-                    now()->addMinutes(15),
+                    now()->addMinutes(30),
                     ['key' => $key],
                 ),
                 'headers' => [],
-                's3_key' => $key,
             ];
         }
 
@@ -50,25 +74,11 @@ class TrackStorage
 
         $signed = $disk->temporaryUploadUrl(
             $key,
-            now()->addMinutes(15),
+            now()->addMinutes(30),
             ['ContentType' => $contentType],
         );
 
-        return [
-            'url' => $signed['url'],
-            'headers' => $signed['headers'],
-            's3_key' => $key,
-        ];
-    }
-
-    /**
-     * Mint the storage key for a new track. Namespaced per user so ownership
-     * can be enforced from the key alone, and ULID-named so two uploads never
-     * collide.
-     */
-    public function newTrackKey(User $user): string
-    {
-        return "users/{$user->id}/".(string) Str::ulid().'.wav';
+        return ['url' => $signed['url'], 'headers' => $signed['headers']];
     }
 
     /**

@@ -96,15 +96,13 @@ Route::middleware('auth')->group(function () {
     Route::get('/tracks/{track}/channels/{channel}/stream', [TrackController::class, 'streamChannel'])->whereNumber('channel')->name('tracks.channels.stream');
     Route::get('/tracks/{track}/channels/{channel}/peaks', [TrackController::class, 'peaksChannel'])->whereNumber('channel')->name('tracks.channels.peaks');
     Route::patch('/tracks/{track}', [TrackController::class, 'update'])->name('tracks.update');
-    Route::post('/tracks/upload-url', [TrackController::class, 'uploadUrl'])->name('tracks.upload-url');
-    Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');
 
-    // Multipart upload for multi-gigabyte files: the browser drives parts
-    // directly to S3 against these signing/finalising endpoints.
-    Route::post('/tracks/multipart', [TrackController::class, 'createMultipart'])->name('tracks.multipart.create');
-    Route::get('/tracks/multipart/sign', [TrackController::class, 'signPart'])->name('tracks.multipart.sign');
-    Route::post('/tracks/multipart/complete', [TrackController::class, 'completeMultipart'])->name('tracks.multipart.complete');
-    Route::post('/tracks/multipart/abort', [TrackController::class, 'abortMultipart'])->name('tracks.multipart.abort');
+    // Browser-encoded multi-channel upload: init mints per-channel Opus + peaks
+    // PUT targets, the browser uploads to them, then store() finalises the set
+    // into Track + TrackChannel rows. uploadPut is the local-disk PUT target
+    // (S3 presigns direct to the bucket instead).
+    Route::post('/tracks/channels/init', [TrackController::class, 'initChannels'])->name('tracks.channels.init');
+    Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');
     Route::post('/tracks/cleanup', [TrackController::class, 'cleanup'])->name('tracks.cleanup');
     Route::post('/tracks', [TrackController::class, 'store'])->name('tracks.store');
     Route::delete('/tracks/{track}', [TrackController::class, 'destroy'])->name('tracks.destroy');

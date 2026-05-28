@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreTrackRequest;
 use App\Http\Requests\UpdateTrackRequest;
-use App\Http\Requests\UploadUrlRequest;
-use App\Jobs\TranscodeTrackToChannels;
 use App\Models\Track;
 use App\Models\TrackChannel;
 use App\Services\TrackStorage;
@@ -14,6 +12,7 @@ use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -247,80 +246,29 @@ class TrackController extends Controller
             ->all();
     }
 
-    public function uploadUrl(UploadUrlRequest $request): array
-    {
-        return $this->storage->uploadTarget(
-            $request->user(),
-            $request->validated('content_type'),
-        );
-    }
-
     /**
-     * Start a multipart upload (the path for multi-gigabyte files). Mints a
-     * user-scoped key and returns the S3 upload id the browser drives parts
-     * against. Finalisation still happens in store().
+     * Mint upload targets for a new track's channels. The browser encodes each
+     * channel to mono Opus + a peaks envelope locally, then PUTs them straight
+     * to the returned keys; store() finalises the set into Track + TrackChannel
+     * rows. The source WAV is never uploaded.
      */
-    public function createMultipart(Request $request): JsonResponse
+    public function initChannels(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'filename' => ['required', 'string', 'max:255', 'regex:/\.wav$/i'],
-            'size' => ['required', 'integer', 'min:1', 'max:53687091200'], // 50 GB
-            'content_type' => ['required', 'string', 'in:audio/wav,audio/x-wav,audio/wave,audio/vnd.wave'],
+            'channels' => ['required', 'integer', 'min:1', 'max:64'],
         ]);
 
-        $key = $this->storage->newTrackKey($request->user());
+        $minted = $this->storage->channelGroupKeys($request->user(), $validated['channels']);
 
-        return response()->json([
-            'key' => $key,
-            'uploadId' => $this->storage->createMultipartUpload($key, $validated['content_type']),
-        ]);
-    }
+        $targets = array_map(fn (array $c) => [
+            'index' => $c['index'],
+            'opus_key' => $c['opus_key'],
+            'opus' => $this->storage->presignPut($c['opus_key'], 'audio/webm'),
+            'peaks_key' => $c['peaks_key'],
+            'peaks' => $this->storage->presignPut($c['peaks_key'], 'application/json'),
+        ], $minted['channels']);
 
-    public function signPart(Request $request): JsonResponse
-    {
-        $key = (string) $request->query('key', '');
-        $this->assertOwnsKey($request, $key);
-
-        $uploadId = (string) $request->query('uploadId', '');
-        $partNumber = (int) $request->query('partNumber', 0);
-        abort_if($uploadId === '' || $partNumber < 1, 422);
-
-        return response()->json([
-            'url' => $this->storage->signPart($key, $uploadId, $partNumber),
-        ]);
-    }
-
-    public function completeMultipart(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'key' => ['required', 'string'],
-            'uploadId' => ['required', 'string'],
-            'parts' => ['required', 'array', 'min:1'],
-            'parts.*.PartNumber' => ['required', 'integer', 'min:1'],
-            'parts.*.ETag' => ['required', 'string'],
-        ]);
-        $this->assertOwnsKey($request, $validated['key']);
-
-        $this->storage->completeMultipartUpload(
-            $validated['key'],
-            $validated['uploadId'],
-            $validated['parts'],
-        );
-
-        return response()->json(['location' => $validated['key']]);
-    }
-
-    public function abortMultipart(Request $request): SymfonyResponse
-    {
-        $validated = $request->validate([
-            'key' => ['required', 'string'],
-            'uploadId' => ['required', 'string'],
-        ]);
-        $this->assertOwnsKey($request, $validated['key']);
-
-        $this->storage->abortMultipartUpload($validated['key'], $validated['uploadId']);
-
-        return response()->noContent();
+        return response()->json(['group' => $minted['group'], 'targets' => $targets]);
     }
 
     /**
@@ -346,41 +294,59 @@ class TrackController extends Controller
      */
     private function assertOwnsKey(Request $request, string $key): void
     {
-        abort_unless(
-            str_starts_with($key, 'users/'.$request->user()->id.'/') && str_ends_with($key, '.wav'),
-            403,
-        );
+        abort_unless(str_starts_with($key, 'users/'.$request->user()->id.'/'), 403);
     }
 
     public function uploadPut(Request $request): \Illuminate\Http\Response
     {
         $key = (string) $request->query('key', '');
-
-        abort_unless(
-            str_starts_with($key, 'users/'.$request->user()->id.'/') && str_ends_with($key, '.wav'),
-            403,
-        );
+        $this->assertOwnsKey($request, $key);
 
         $this->storage->put($key, $request->getContent(asResource: true));
 
         return response()->noContent();
     }
 
+    /**
+     * Finalise a browser-encoded multi-channel upload: every channel's Opus and
+     * peaks objects are already in the bucket (uploaded against the keys minted
+     * by initChannels), so we just verify they exist and are owner-scoped, then
+     * create the Track and its TrackChannel rows. No server-side transcode.
+     */
     public function store(StoreTrackRequest $request): RedirectResponse
     {
-        $key = $request->validated('s3_key');
+        $data = $request->validated();
+        $user = $request->user();
+        $channels = $data['channels'];
 
-        abort_unless($this->storage->exists($key), 422, 'Upload not found in storage.');
+        foreach ($channels as $c) {
+            abort_unless($this->storage->exists($c['opus_key']), 422, 'A channel upload is missing in storage.');
+            abort_unless($this->storage->exists($c['peaks_key']), 422, 'A channel peaks file is missing in storage.');
+        }
 
-        $track = $request->user()->tracks()->create([
-            's3_key' => $key,
-            'event_id' => $request->validated('event_id'),
-            'original_name' => $request->validated('original_name'),
-            'mime' => $request->validated('mime'),
-            'size' => $request->validated('size'),
-        ]);
+        DB::transaction(function () use ($user, $data, $channels) {
+            $track = $user->tracks()->create([
+                'event_id' => $data['event_id'] ?? null,
+                's3_key' => null,
+                'original_name' => $data['original_name'],
+                'mime' => 'audio/webm',
+                'size' => array_sum(array_column($channels, 'size')),
+                'channels_count' => count($channels),
+                'sample_rate' => $data['sample_rate'],
+                'duration_seconds' => $data['duration_seconds'],
+                'channel_labels' => array_map(fn ($c) => $c['label'] ?? null, $channels),
+            ]);
 
-        TranscodeTrackToChannels::dispatch($track);
+            foreach ($channels as $c) {
+                $track->channels()->create([
+                    'channel_index' => $c['index'],
+                    's3_key' => $c['opus_key'],
+                    'peaks_s3_key' => $c['peaks_key'],
+                    'label' => $c['label'] ?? null,
+                    'size' => $c['size'],
+                ]);
+            }
+        });
 
         // Stay on whichever page the upload came from (track list or an event).
         return back();
