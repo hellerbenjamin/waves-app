@@ -16,3 +16,13 @@ body {
 a {
     text-decoration: none;
 }
+
+/*
+ * PrimeVue's determinate ProgressBar animates the fill width over 1s, but its
+ * "%" label updates instantly — so under rapid progress updates (upload/encode
+ * reporting many times a second) the number races ahead of the visibly-lagging
+ * bar. Snap the width to the value so the two always agree.
+ */
+.p-progressbar-determinate .p-progressbar-value {
+    transition: width 0.15s linear;
+}
