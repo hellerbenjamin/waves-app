@@ -32,8 +32,11 @@ class TrackController extends Controller
         $tracks = $request->user()
             ->tracks()
             ->with('event:id,name')
-            ->withExists('channels')
+            // select() must come before withExists() — withExists appends its
+            // subquery column via addSelect, and a later explicit select()
+            // would drop it, leaving channels_exists null (always "Processing").
             ->select(['id', 'event_id', 'original_name', 'size', 'duration_seconds', 'created_at'])
+            ->withExists('channels')
             ->latest()
             ->get()
             ->map(fn (Track $t) => [
@@ -41,7 +44,7 @@ class TrackController extends Controller
                 'name' => $t->original_name,
                 'size' => $t->size,
                 'duration_seconds' => $t->duration_seconds,
-                // Channels exist iff the transcode job has finished.
+                // Channels exist once the browser-side upload has finalised.
                 'ready' => (bool) $t->channels_exists,
                 'event_id' => $t->event_id,
                 'event' => $t->event ? ['id' => $t->event->id, 'name' => $t->event->name] : null,

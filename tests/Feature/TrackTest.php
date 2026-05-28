@@ -39,6 +39,25 @@ class TrackTest extends TestCase
             );
     }
 
+    public function test_index_marks_a_track_with_channels_as_ready(): void
+    {
+        $user = User::factory()->create();
+        $withChannels = Track::factory()->for($user)->withChannels()->create();
+        $pending = Track::factory()->for($user)->create(); // no channel rows yet
+
+        $this->actingAs($user)
+            ->get('/tracks')
+            ->assertOk()
+            ->assertInertia(fn ($page) => $page
+                ->has('tracks', 2)
+                // latest() orders newest first: $pending was created last.
+                ->where('tracks.0.id', $pending->id)
+                ->where('tracks.0.ready', false)
+                ->where('tracks.1.id', $withChannels->id)
+                ->where('tracks.1.ready', true)
+            );
+    }
+
     public function test_show_403s_for_other_users_track(): void
     {
         $user = User::factory()->create();
