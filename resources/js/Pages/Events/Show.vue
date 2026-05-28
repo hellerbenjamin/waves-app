@@ -21,6 +21,8 @@ import { typeLabel, typeOptions } from '@/lib/eventTypes';
 import { useS3Upload, apiFetch } from '@/composables/useS3Upload';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
 import { useStitchedSplit } from '@/composables/useStitchedSplit.js';
+import { useChannelUpload } from '@/composables/useChannelUpload.js';
+import { isOpusEncodeSupported } from '@/lib/opusEncode.js';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
 import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
 
@@ -178,34 +180,42 @@ const onMediaSelected = (event) => {
 // --- Track uploads (audio, straight into this event) -------------------------
 const trackInput = ref(null);
 
-const { uploads: trackUploads, addFiles: addTrackFiles } = useS3Upload({
-    routes: {
-        uploadUrl: route('tracks.upload-url'),
-        multipartCreate: route('tracks.multipart.create'),
-        multipartSign: route('tracks.multipart.sign'),
-        multipartComplete: route('tracks.multipart.complete'),
-        multipartAbort: route('tracks.multipart.abort'),
-        cleanup: route('tracks.cleanup'),
-    },
-    // .wav may arrive with an empty MIME type; the server allowlist needs one.
-    initBody: (file) => ({ filename: file.name, size: file.size, content_type: file.type || 'audio/wav' }),
-    validate: (file) => /\.wav$/i.test(file.name) ? null : 'only .wav files',
-    finalize: (file, key) => new Promise((resolve, reject) => {
-        router.post(route('tracks.store'), {
-            s3_key: key,
-            original_name: file.name,
-            mime: file.type || 'audio/wav',
-            size: file.size,
-            event_id: props.event.id,
-        }, { preserveScroll: true, preserveState: true, onSuccess: resolve, onError: reject });
-    }),
-    onUploaded: (file) => toast?.add({ severity: 'success', summary: 'Uploaded', detail: file.name, life: 3000 }),
-    onError: (file, message) => toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${file?.name}: ${message}`, life: 5000 }),
-});
+// Browser-side ingestion: a (multi-channel) WAV blob is encoded to per-channel
+// Opus locally, then only the compressed channels are uploaded. The dialog
+// outputs and the direct picker both funnel through uploadTrackBlob.
+const trackUploads = ref([]);
+const { uploadWavFile: uploadTrackWav } = useChannelUpload();
+
+const uploadTrackBlob = async (file) => {
+    if (!isOpusEncodeSupported()) {
+        toast?.add({ severity: 'error', summary: 'Unsupported browser', detail: 'Audio upload needs a desktop browser with WebCodecs.', life: 6000 });
+        return;
+    }
+    const entry = ref({ name: file.name.replace(/\.[^.]+$/, ''), progress: 0, status: 'encoding' });
+    trackUploads.value.push(entry.value);
+
+    try {
+        await uploadTrackWav(file, {
+            name: file.name,
+            eventId: props.event.id,
+            onProgress: (p) => {
+                entry.value.progress = Math.round(p * 100);
+                entry.value.status = p < 0.7 ? 'encoding' : 'uploading';
+            },
+        });
+        entry.value.status = 'done';
+        trackUploads.value = trackUploads.value.filter((u) => u !== entry.value);
+        toast?.add({ severity: 'success', summary: 'Uploaded', detail: entry.value.name, life: 3000 });
+        refresh();
+    } catch (err) {
+        entry.value.status = 'error';
+        toast?.add({ severity: 'error', summary: 'Upload failed', detail: `${entry.value.name}: ${err?.message || 'error'}`, life: 5000 });
+    }
+};
 
 // Long WAVs get cut up in the browser before upload (see useSplitBeforeUpload).
-// The composable hands committed segments back to the same addTrackFiles path
-// so the storage/finalise plumbing is shared.
+// The composable hands committed segments back to uploadTrackBlob so the
+// encode/upload plumbing is shared.
 const {
     splitDialogVisible: trackSplitDialogVisible,
     pendingSplitFile: pendingTrackSplitFile,
@@ -213,7 +223,7 @@ const {
     onSplitCommit: onTrackSplitCommit,
     onSplitUploadWhole: onTrackSplitUploadWhole,
     onSplitCancel: onTrackSplitCancel,
-} = useSplitBeforeUpload((file) => addTrackFiles([file]));
+} = useSplitBeforeUpload((file) => uploadTrackBlob(file));
 
 const pickTrack = () => trackInput.value?.click();
 const onTrackSelected = (event) => {
@@ -230,7 +240,7 @@ const {
     openStitchedSplit: openTrackStitchedSplit,
     onStitchedCommit: onTrackStitchedCommit,
     onStitchedCancel: onTrackStitchedCancel,
-} = useStitchedSplit((file) => addTrackFiles([file]));
+} = useStitchedSplit((file) => uploadTrackBlob(file));
 
 const stitchedTrackInput = ref(null);
 const pickStitchedTracks = () => stitchedTrackInput.value?.click();
