@@ -19,7 +19,6 @@ class EventLinkContext
 {
     /**
      * @param  Closure(Track): string  $trackShow
-     * @param  Closure(Track): string  $trackStream
      * @param  Closure(Media): string  $mediaStream
      * @param  Closure(Media): string  $mediaThumb
      * @param  Closure(Media): string  $mediaDownload
@@ -30,7 +29,6 @@ class EventLinkContext
     public function __construct(
         public readonly bool $shared,
         public readonly Closure $trackShow,
-        public readonly Closure $trackStream,
         public readonly Closure $mediaStream,
         public readonly Closure $mediaThumb,
         public readonly Closure $mediaDownload,
@@ -44,7 +42,6 @@ class EventLinkContext
         return new self(
             shared: false,
             trackShow: fn (Track $t) => route('tracks.show', $t->id),
-            trackStream: fn (Track $t) => route('tracks.stream', $t->id),
             mediaStream: fn (Media $m) => route('media.stream', $m->id),
             mediaThumb: fn (Media $m) => route('media.thumb', $m->id),
             mediaDownload: fn (Media $m) => route('media.download', $m->id),
@@ -69,7 +66,6 @@ class EventLinkContext
         return new self(
             shared: true,
             trackShow: fn (Track $t2) => route('events.shared.track-show', [$t, $t2->id]),
-            trackStream: fn (Track $t2) => route('events.shared.track-stream', [$t, $t2->id]),
             mediaStream: fn (Media $m) => route('events.shared.media-stream', [$t, $m->id]),
             mediaThumb: fn (Media $m) => route('events.shared.media-thumb', [$t, $m->id]),
             mediaDownload: fn (Media $m) => route('events.shared.media-download', [$t, $m->id]),
@@ -97,7 +93,6 @@ class EventLinkContext
         return new self(
             shared: true,
             trackShow: fn (Track $t) => route('profile.shared.track-show', [$userToken, $event->id, $t->id]),
-            trackStream: fn (Track $t) => route('profile.shared.track-stream', [$userToken, $event->id, $t->id]),
             mediaStream: fn (Media $m) => route('profile.shared.media-stream', [$userToken, $event->id, $m->id]),
             mediaThumb: fn (Media $m) => route('profile.shared.media-thumb', [$userToken, $event->id, $m->id]),
             mediaDownload: fn (Media $m) => route('profile.shared.media-download', [$userToken, $event->id, $m->id]),

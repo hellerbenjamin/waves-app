@@ -14,9 +14,9 @@ class DefaultMixTest extends TestCase
     public function test_update_persists_and_trims_default_mix_to_channel_count(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
-        // The factory's withPeaks() defines 1 channel; extra entries should be
+        // The factory's withChannels() defaults to 1 channel; extra entries should be
         // trimmed, truthy "muted" coerced to bool, and floats rounded.
         $this->actingAs($user)
             ->patchJson(route('tracks.update', $track), [
@@ -37,7 +37,7 @@ class DefaultMixTest extends TestCase
     public function test_update_rejects_out_of_range_values(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
         $this->actingAs($user)
             ->patchJson(route('tracks.update', $track), [
@@ -49,7 +49,7 @@ class DefaultMixTest extends TestCase
     public function test_update_can_clear_default_mix_with_null(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create([
+        $track = Track::factory()->for($user)->withChannels()->create([
             'default_mix' => [['level' => 50, 'pan' => 0, 'muted' => false]],
         ]);
 
@@ -64,7 +64,7 @@ class DefaultMixTest extends TestCase
     public function test_update_rejects_malformed_default_mix(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create();
+        $track = Track::factory()->for($user)->withChannels()->create();
 
         $this->actingAs($user)
             ->patchJson(route('tracks.update', $track), [
@@ -76,7 +76,7 @@ class DefaultMixTest extends TestCase
     public function test_default_mix_is_exposed_on_both_owner_and_shared_views(): void
     {
         $user = User::factory()->create();
-        $track = Track::factory()->for($user)->withPeaks()->create([
+        $track = Track::factory()->for($user)->withChannels()->create([
             'default_mix' => [['level' => 75, 'pan' => -25, 'muted' => false]],
             'share_token' => 'shared-token',
         ]);

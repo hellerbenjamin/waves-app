@@ -62,15 +62,16 @@ class ShareTrackTest extends TestCase
 
     public function test_public_show_renders_for_a_valid_token_without_auth(): void
     {
-        $track = Track::factory()->for(User::factory())->withPeaks()->create([
+        $track = Track::factory()->for(User::factory())->withChannels()->create([
             'share_token' => 'publicshowtoken12345',
             'original_name' => 'shared.wav',
         ]);
 
-        // A public share page must stay revocable, so it embeds the token-scoped
-        // app stream route (which 404s the moment the token is cleared) rather
-        // than baking in a long-lived presigned URL. The presigned URL is minted
-        // fresh per request by the stream endpoint instead.
+        // The share token is the access control: per-channel stream/peaks URLs
+        // are tucked behind it and 404 the moment it's cleared (see
+        // test_public_stream_stops_working_after_unshare). The presenter emits
+        // those token-scoped routes — no presigned object URLs bake into a
+        // share page.
         $this->get('/share/publicshowtoken12345')
             ->assertOk()
             ->assertInertia(fn ($page) => $page
@@ -78,7 +79,10 @@ class ShareTrackTest extends TestCase
                 ->where('canEdit', false)
                 ->where('track.id', $track->id)
                 ->where('track.name', 'shared.wav')
-                ->where('track.stream_url', route('tracks.shared-stream', $track->share_token))
+                ->where('track.ready', true)
+                ->has('track.channels', 1)
+                ->where('track.channels.0.index', 0)
+                ->where('track.channels.0.stream_url', route('tracks.shared-channels.stream', [$track->share_token, 0]))
                 ->where('track.stream_cross_origin', 'anonymous')
             );
     }
@@ -88,52 +92,44 @@ class ShareTrackTest extends TestCase
         $this->get('/share/does-not-exist')->assertNotFound();
     }
 
-    public function test_public_stream_serves_audio_for_a_valid_token(): void
+    public function test_public_channel_stream_serves_audio_for_a_valid_token(): void
     {
         config(['filesystems.tracks_disk' => 'local']);
         Storage::fake('local');
 
         $user = User::factory()->create();
-        $key = "users/{$user->id}/shared.wav";
-        Storage::disk('local')->put($key, 'RIFF....WAVEfake');
-        $track = Track::factory()->for($user)->create([
-            's3_key' => $key,
-            'mime' => 'audio/wav',
-            'share_token' => 'publicstreamtoken123',
-        ]);
+        $track = Track::factory()->for($user)->withChannels()->create(['share_token' => 'publicstreamtoken123']);
+        $channel = $track->channels()->first();
+        Storage::disk('local')->put($channel->s3_key, 'fake-opus');
 
-        $response = $this->get("/share/{$track->share_token}/stream");
+        $response = $this->get("/share/{$track->share_token}/channels/0/stream");
 
         $response->assertOk();
-        $this->assertSame('audio/wav', $response->headers->get('Content-Type'));
+        $this->assertSame('audio/webm', $response->headers->get('Content-Type'));
     }
 
-    public function test_public_stream_404s_for_unknown_token(): void
+    public function test_public_channel_stream_404s_for_unknown_token(): void
     {
-        $this->get('/share/nope/stream')->assertNotFound();
+        $this->get('/share/nope/channels/0/stream')->assertNotFound();
     }
 
-    public function test_public_stream_stops_working_after_unshare(): void
+    public function test_public_channel_stream_stops_working_after_unshare(): void
     {
         config(['filesystems.tracks_disk' => 'local']);
         Storage::fake('local');
 
         $user = User::factory()->create();
-        $key = "users/{$user->id}/shared.wav";
-        Storage::disk('local')->put($key, 'RIFF....WAVEfake');
-        $track = Track::factory()->for($user)->create([
-            's3_key' => $key,
-            'mime' => 'audio/wav',
-            'share_token' => 'revoketoken123456789',
-        ]);
+        $track = Track::factory()->for($user)->withChannels()->create(['share_token' => 'revoketoken123456789']);
+        $channel = $track->channels()->first();
+        Storage::disk('local')->put($channel->s3_key, 'fake-opus');
 
-        // The shared page embeds the token route, not a long-lived presigned
-        // URL, so clearing the token revokes playback immediately rather than
-        // leaving an already-issued URL valid until it expires.
-        $this->get("/share/{$track->share_token}/stream")->assertOk();
+        // Share pages embed the token route, never a long-lived presigned URL,
+        // so clearing the token revokes playback immediately rather than
+        // leaving an already-issued URL valid until expiry.
+        $this->get("/share/{$track->share_token}/channels/0/stream")->assertOk();
 
         $this->actingAs($user)->delete("/tracks/{$track->id}/share")->assertNoContent();
 
-        $this->get('/share/revoketoken123456789/stream')->assertNotFound();
+        $this->get('/share/revoketoken123456789/channels/0/stream')->assertNotFound();
     }
 }

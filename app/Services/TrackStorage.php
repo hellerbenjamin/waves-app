@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Track;
+use App\Models\TrackChannel;
 use App\Models\User;
 use App\Services\Concerns\InteractsWithS3;
 use Illuminate\Filesystem\AwsS3V3Adapter;
@@ -22,25 +23,49 @@ class TrackStorage
     use InteractsWithS3;
 
     /**
-     * Mint an upload target for a new track. S3 disks return a presigned PUT
-     * URL the browser hits directly; other disks can't presign, so point the
-     * browser at a signed app endpoint that streams the body to disk instead.
+     * Mint the object keys for one track's channel group. The browser encodes
+     * each channel to mono Opus and a peaks envelope locally, then uploads them
+     * straight to these keys; the source WAV never leaves the machine. Keys are
+     * grouped under a shared ULID and owner-scoped so the whole set lives
+     * together and ownership is derivable from the prefix before any Track row
+     * exists.
      *
-     * @return array{url: string, headers: array<string, string>, s3_key: string}
+     * @return array{group:string, channels: list<array{index:int, opus_key:string, peaks_key:string}>}
      */
-    public function uploadTarget(User $user, string $contentType): array
+    public function channelGroupKeys(User $user, int $count): array
     {
-        $key = $this->newTrackKey($user);
+        $group = (string) Str::ulid();
+        $channels = [];
 
+        for ($i = 0; $i < $count; $i++) {
+            $pad = str_pad((string) $i, 2, '0', STR_PAD_LEFT);
+            $channels[] = [
+                'index' => $i,
+                'opus_key' => "users/{$user->id}/{$group}/ch{$pad}.webm",
+                'peaks_key' => "users/{$user->id}/{$group}/ch{$pad}.peaks.json",
+            ];
+        }
+
+        return ['group' => $group, 'channels' => $channels];
+    }
+
+    /**
+     * Presign a single direct-to-bucket PUT for an already-minted key. On S3 the
+     * browser PUTs straight to R2; on a local disk it PUTs to a signed app
+     * endpoint that streams the body to disk.
+     *
+     * @return array{url:string, headers:array<string,string>}
+     */
+    public function presignPut(string $key, string $contentType): array
+    {
         if (! $this->isS3()) {
             return [
                 'url' => URL::temporarySignedRoute(
                     'tracks.upload-put',
-                    now()->addMinutes(15),
+                    now()->addMinutes(30),
                     ['key' => $key],
                 ),
                 'headers' => [],
-                's3_key' => $key,
             ];
         }
 
@@ -49,105 +74,16 @@ class TrackStorage
 
         $signed = $disk->temporaryUploadUrl(
             $key,
-            now()->addMinutes(15),
+            now()->addMinutes(30),
             ['ContentType' => $contentType],
         );
 
-        return [
-            'url' => $signed['url'],
-            'headers' => $signed['headers'],
-            's3_key' => $key,
-        ];
+        return ['url' => $signed['url'], 'headers' => $signed['headers']];
     }
 
     /**
-     * Mint the storage key for a new track. Namespaced per user so ownership
-     * can be enforced from the key alone, and ULID-named so two uploads never
-     * collide.
-     */
-    public function newTrackKey(User $user): string
-    {
-        return "users/{$user->id}/".(string) Str::ulid().'.wav';
-    }
-
-    /**
-     * Build a playable HTTP response for a track. S3 streams (and seeks)
-     * directly from a short-lived signed URL; local disks are served through a
-     * range-aware file response for scrubbing.
-     */
-    public function streamResponse(Track $track): SymfonyResponse
-    {
-        if ($this->isS3()) {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl($track->s3_key, now()->addMinutes(30)));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($track->s3_key), 404);
-
-        return response()->file($disk->path($track->s3_key), [
-            'Content-Type' => $track->mime ?: 'audio/wav',
-        ]);
-    }
-
-    /**
-     * The URL the player loads audio from. For an owner's own page an S3 disk
-     * is handed a presigned object URL directly (self-authenticating, fetched
-     * without cookies, CORS-clean for the mixer); the TTL must outlast a
-     * listening session since it's baked into the page at render time.
-     *
-     * A public share page must stay revocable, so it never bakes in a
-     * long-lived presigned URL: it always uses the given in-app route, which
-     * mints a fresh short-lived URL per request and 404s the moment the share
-     * token is cleared. Local disks always use the route regardless.
-     */
-    public function playbackUrl(Track $track, string $localRoute, bool $shared = false): string
-    {
-        if ($this->isS3() && ! $shared) {
-            return $this->disk()->temporaryUrl($track->s3_key, now()->addHours(6));
-        }
-
-        return $localRoute;
-    }
-
-    /**
-     * Build a download response for a track: presign an S3 GET that forces
-     * Content-Disposition: attachment with the original filename, or fall back
-     * to a streamed file download on a local disk.
-     */
-    public function downloadResponse(Track $track): SymfonyResponse
-    {
-        $filename = $track->original_name ?: ('track-'.$track->id.'.wav');
-
-        if ($this->isS3()) {
-            /** @var AwsS3V3Adapter $disk */
-            $disk = $this->disk();
-
-            return redirect()->away($disk->temporaryUrl(
-                $track->s3_key,
-                now()->addMinutes(15),
-                [
-                    'ResponseContentDisposition' => 'attachment; filename="'.addslashes($filename).'"',
-                    'ResponseContentType' => $track->mime ?: 'audio/wav',
-                ],
-            ));
-        }
-
-        $disk = $this->disk();
-        abort_unless($disk->exists($track->s3_key), 404);
-
-        return response()->download(
-            $disk->path($track->s3_key),
-            $filename,
-            ['Content-Type' => $track->mime ?: 'audio/wav'],
-        );
-    }
-
-    /**
-     * The crossorigin mode the audio element must use for playbackUrl().
-     * Presigned S3 URLs carry no cookies, so they load anonymously; the local
+     * The crossorigin mode the channel audio elements must use. Presigned R2
+     * URLs carry no cookies, so they load anonymously; the in-app channel
      * route is cookie-authenticated and same-origin, so it sends credentials.
      * Either way the source is CORS-clean, so per-channel mixing can run.
      */
@@ -157,10 +93,10 @@ class TrackStorage
     }
 
     /**
-     * The storage key for a track's peaks envelope. Lives alongside the WAV in
-     * the same per-user namespace (so ownership is still derivable from the key
-     * prefix) and is generated deterministically from the WAV key so a deleted
-     * track always cleans up the right sibling.
+     * Storage key for the (legacy, pre-transcode) sibling peaks JSON. Still
+     * referenced by Track destroy() to clean up artifacts of a track that was
+     * deleted before the transcode finished — once a track has channel rows,
+     * its s3_key is null and this method isn't called.
      */
     public function peaksKey(Track $track): string
     {
@@ -173,44 +109,70 @@ class TrackStorage
     }
 
     /**
-     * The URL the mixer fetches peaks from. Mirrors playbackUrl(): on S3 the
-     * owner gets a presigned object URL baked into the page (CORS-clean for
-     * the in-page fetch); a shared viewer always uses the given in-app route
-     * so revoking a share token kills peak access too. Local disks always use
-     * the route. Returns null until the peaks file exists.
+     * Owner page: presigned per-channel Opus URL (CORS-clean for the mixer,
+     * baked into the page). Shared/local pages always go through the in-app
+     * stream route so a revoked share token instantly stops working.
      */
-    public function peaksUrl(Track $track, string $localRoute, bool $shared = false): ?string
+    public function channelStreamUrl(TrackChannel $channel, string $localRoute, bool $shared = false): string
     {
-        if (! $track->peaks_ready) {
+        if ($this->isS3() && ! $shared) {
+            return $this->disk()->temporaryUrl($channel->s3_key, now()->addHours(6));
+        }
+
+        return $localRoute;
+    }
+
+    /** Same rules as {@see channelStreamUrl}, applied to the channel's peaks JSON. */
+    public function channelPeaksUrl(TrackChannel $channel, string $localRoute, bool $shared = false): ?string
+    {
+        if ($channel->peaks_s3_key === null) {
             return null;
         }
 
         if ($this->isS3() && ! $shared) {
-            return $this->disk()->temporaryUrl($this->peaksKey($track), now()->addHours(6));
+            return $this->disk()->temporaryUrl($channel->peaks_s3_key, now()->addHours(6));
         }
 
         return $localRoute;
     }
 
     /**
-     * Build a response that serves the peaks JSON: redirects to a short-lived
-     * presigned URL on S3, or streams the file on a local disk. Used by both
-     * the auth'd and shared peaks routes.
+     * Build the playback response for a single channel's Opus stream. Mirrors
+     * {@see streamResponse}: presign-and-redirect on S3, range-aware file on
+     * local. Content-Type is fixed to audio/webm — the encoder we run in the
+     * transcode job emits WebM-containerised Opus.
      */
-    public function peaksResponse(Track $track): SymfonyResponse
+    public function channelStreamResponse(TrackChannel $channel): SymfonyResponse
     {
-        $key = $this->peaksKey($track);
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return redirect()->away($disk->temporaryUrl($channel->s3_key, now()->addMinutes(30)));
+        }
+
+        $disk = $this->disk();
+        abort_unless($disk->exists($channel->s3_key), 404);
+
+        return response()->file($disk->path($channel->s3_key), [
+            'Content-Type' => 'audio/webm',
+        ]);
+    }
+
+    public function channelPeaksResponse(TrackChannel $channel): SymfonyResponse
+    {
+        abort_if($channel->peaks_s3_key === null, 404);
 
         if ($this->isS3()) {
             /** @var AwsS3V3Adapter $disk */
             $disk = $this->disk();
 
-            return redirect()->away($disk->temporaryUrl($key, now()->addMinutes(30)));
+            return redirect()->away($disk->temporaryUrl($channel->peaks_s3_key, now()->addMinutes(30)));
         }
 
         $disk = $this->disk();
-        abort_unless($disk->exists($key), 404);
+        abort_unless($disk->exists($channel->peaks_s3_key), 404);
 
-        return response()->file($disk->path($key), ['Content-Type' => 'application/json']);
+        return response()->file($disk->path($channel->peaks_s3_key), ['Content-Type' => 'application/json']);
     }
 }

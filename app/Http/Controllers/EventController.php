@@ -9,6 +9,7 @@ use App\Models\Event;
 use App\Models\EventInvite;
 use App\Models\Media;
 use App\Models\Track;
+use App\Models\TrackChannel;
 use App\Services\MediaStorage;
 use App\Services\TrackStorage;
 use App\Support\EventLinkContext;
@@ -198,31 +199,36 @@ class EventController extends Controller
     public function showSharedTrack(Event $event, Track $track): Response
     {
         abort_unless($track->event_id === $event->id, 404);
+        $track->load('channels');
 
         return Inertia::render('Tracks/Show', [
             'canEdit' => false,
             'templates' => [],
             'track' => $this->trackPresenter->show(
                 $track,
-                route('events.shared.track-stream', [$event->share_token, $track->id]),
-                route('events.shared.track-peaks', [$event->share_token, $track->id]),
+                fn (TrackChannel $c) => route('events.shared.channels.stream', [$event->share_token, $track->id, $c->channel_index]),
+                fn (TrackChannel $c) => route('events.shared.channels.peaks', [$event->share_token, $track->id, $c->channel_index]),
                 shared: true,
             ),
         ]);
     }
 
-    public function streamSharedTrack(Event $event, Track $track): SymfonyResponse
+    public function streamSharedChannel(Event $event, Track $track, int $channel): SymfonyResponse
     {
         abort_unless($track->event_id === $event->id, 404);
+        $row = $track->channels()->where('channel_index', $channel)->first();
+        abort_unless($row !== null, 404);
 
-        return $this->tracks->streamResponse($track);
+        return $this->tracks->channelStreamResponse($row);
     }
 
-    public function peaksSharedTrack(Event $event, Track $track): SymfonyResponse
+    public function peaksSharedChannel(Event $event, Track $track, int $channel): SymfonyResponse
     {
         abort_unless($track->event_id === $event->id, 404);
+        $row = $track->channels()->where('channel_index', $channel)->first();
+        abort_unless($row !== null, 404);
 
-        return $this->tracks->peaksResponse($track);
+        return $this->tracks->channelPeaksResponse($row);
     }
 
     public function streamSharedMedia(Event $event, Media $media): SymfonyResponse

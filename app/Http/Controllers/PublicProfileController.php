@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Event;
 use App\Models\Media;
 use App\Models\Track;
+use App\Models\TrackChannel;
 use App\Models\User;
 use App\Services\MediaStorage;
 use App\Services\TrackStorage;
@@ -76,31 +77,36 @@ class PublicProfileController extends Controller
     public function showTrack(User $user, Event $event, Track $track): Response
     {
         abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
+        $track->load('channels');
 
         return Inertia::render('Tracks/Show', [
             'canEdit' => false,
             'templates' => [],
             'track' => $this->trackPresenter->show(
                 $track,
-                route('profile.shared.track-stream', [$user->share_token, $event->id, $track->id]),
-                route('profile.shared.track-peaks', [$user->share_token, $event->id, $track->id]),
+                fn (TrackChannel $c) => route('profile.shared.channels.stream', [$user->share_token, $event->id, $track->id, $c->channel_index]),
+                fn (TrackChannel $c) => route('profile.shared.channels.peaks', [$user->share_token, $event->id, $track->id, $c->channel_index]),
                 shared: true,
             ),
         ]);
     }
 
-    public function streamTrack(User $user, Event $event, Track $track): SymfonyResponse
+    public function streamChannel(User $user, Event $event, Track $track, int $channel): SymfonyResponse
     {
         abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
+        $row = $track->channels()->where('channel_index', $channel)->first();
+        abort_unless($row !== null, 404);
 
-        return $this->tracks->streamResponse($track);
+        return $this->tracks->channelStreamResponse($row);
     }
 
-    public function peaksTrack(User $user, Event $event, Track $track): SymfonyResponse
+    public function peaksChannel(User $user, Event $event, Track $track, int $channel): SymfonyResponse
     {
         abort_unless($event->user_id === $user->id && $track->event_id === $event->id, 404);
+        $row = $track->channels()->where('channel_index', $channel)->first();
+        abort_unless($row !== null, 404);
 
-        return $this->tracks->peaksResponse($track);
+        return $this->tracks->channelPeaksResponse($row);
     }
 
     public function streamMedia(User $user, Event $event, Media $media): SymfonyResponse

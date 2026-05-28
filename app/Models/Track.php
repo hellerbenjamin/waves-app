@@ -6,6 +6,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Track extends Model
 {
@@ -21,7 +22,6 @@ class Track extends Model
         'content_hash',
         'channels_count',
         'sample_rate',
-        'peaks_ready',
         'channel_labels',
         'default_mix',
         'duration_seconds',
@@ -34,7 +34,6 @@ class Track extends Model
         'size' => 'integer',
         'channels_count' => 'integer',
         'sample_rate' => 'integer',
-        'peaks_ready' => 'boolean',
         'duration_seconds' => 'float',
     ];
 
@@ -48,11 +47,20 @@ class Track extends Model
         return $this->belongsTo(Event::class);
     }
 
-    /** Cheap columns the track cards render from — never carries the peaks envelope (it lives in object storage). */
+    /**
+     * The track's audio, one row per source-channel mono Opus stream. Always
+     * iterate in `channel_index` order — the mixer UI labels by position.
+     */
+    public function channels(): HasMany
+    {
+        return $this->hasMany(TrackChannel::class)->orderBy('channel_index');
+    }
+
+    /** Cheap columns the track cards render from — `channels_count` doubles as the readiness signal once the transcode job has populated channel rows. */
     public function scopeForCards(Builder $query): Builder
     {
         return $query->select([
-            'id', 'event_id', 'original_name', 'duration_seconds', 's3_key', 'peaks_ready', 'channels_count',
+            'id', 'event_id', 'original_name', 'duration_seconds', 's3_key', 'channels_count',
         ]);
     }
 }

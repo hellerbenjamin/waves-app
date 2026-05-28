@@ -14,15 +14,15 @@ use Inertia\Inertia;
 
 // Public share links — no auth; the unguessable token is the access control.
 Route::get('/share/{track:share_token}', [TrackController::class, 'showShared'])->name('tracks.shared');
-Route::get('/share/{track:share_token}/stream', [TrackController::class, 'streamShared'])->name('tracks.shared-stream');
-Route::get('/share/{track:share_token}/peaks', [TrackController::class, 'peaksShared'])->name('tracks.shared-peaks');
+Route::get('/share/{track:share_token}/channels/{channel}/stream', [TrackController::class, 'streamSharedChannel'])->whereNumber('channel')->name('tracks.shared-channels.stream');
+Route::get('/share/{track:share_token}/channels/{channel}/peaks', [TrackController::class, 'peaksSharedChannel'])->whereNumber('channel')->name('tracks.shared-channels.peaks');
 
 // A shared event reaches its own tracks and media through the event token, so
 // individual items don't each need a share link.
 Route::get('/events/share/{event:share_token}', [EventController::class, 'showShared'])->name('events.shared');
 Route::get('/events/share/{event:share_token}/tracks/{track}', [EventController::class, 'showSharedTrack'])->name('events.shared.track-show');
-Route::get('/events/share/{event:share_token}/tracks/{track}/stream', [EventController::class, 'streamSharedTrack'])->name('events.shared.track-stream');
-Route::get('/events/share/{event:share_token}/tracks/{track}/peaks', [EventController::class, 'peaksSharedTrack'])->name('events.shared.track-peaks');
+Route::get('/events/share/{event:share_token}/tracks/{track}/channels/{channel}/stream', [EventController::class, 'streamSharedChannel'])->whereNumber('channel')->name('events.shared.channels.stream');
+Route::get('/events/share/{event:share_token}/tracks/{track}/channels/{channel}/peaks', [EventController::class, 'peaksSharedChannel'])->whereNumber('channel')->name('events.shared.channels.peaks');
 Route::get('/events/share/{event:share_token}/media/{media}/stream', [EventController::class, 'streamSharedMedia'])->name('events.shared.media-stream');
 Route::get('/events/share/{event:share_token}/media/{media}/thumb', [EventController::class, 'thumbSharedMedia'])->name('events.shared.media-thumb');
 Route::get('/events/share/{event:share_token}/media/{media}/download', [EventController::class, 'downloadSharedMedia'])->name('events.shared.media-download');
@@ -44,8 +44,8 @@ Route::post('/events/share/{event:share_token}/media', [EventShareUploadControll
 Route::get('/u/{user:share_token}', [PublicProfileController::class, 'show'])->name('profile.shared');
 Route::get('/u/{user:share_token}/events/{event}', [PublicProfileController::class, 'showEvent'])->name('profile.shared.event');
 Route::get('/u/{user:share_token}/events/{event}/tracks/{track}', [PublicProfileController::class, 'showTrack'])->name('profile.shared.track-show');
-Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/stream', [PublicProfileController::class, 'streamTrack'])->name('profile.shared.track-stream');
-Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/peaks', [PublicProfileController::class, 'peaksTrack'])->name('profile.shared.track-peaks');
+Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/channels/{channel}/stream', [PublicProfileController::class, 'streamChannel'])->whereNumber('channel')->name('profile.shared.channels.stream');
+Route::get('/u/{user:share_token}/events/{event}/tracks/{track}/channels/{channel}/peaks', [PublicProfileController::class, 'peaksChannel'])->whereNumber('channel')->name('profile.shared.channels.peaks');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/stream', [PublicProfileController::class, 'streamMedia'])->name('profile.shared.media-stream');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/thumb', [PublicProfileController::class, 'thumbMedia'])->name('profile.shared.media-thumb');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/download', [PublicProfileController::class, 'downloadMedia'])->name('profile.shared.media-download');
@@ -76,6 +76,12 @@ Route::get('/', function () {
     ]);
 });
 
+// Throwaway sync test — used to evaluate whether N parallel <audio> elements
+// stay locked tightly enough for the per-channel mixer to drive each channel
+// as its own stream instead of a single multi-channel file. Delete once we
+// have data.
+Route::get('/sync-test', fn () => Inertia::render('SyncTest'))->middleware('auth')->name('sync-test');
+
 Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
@@ -87,19 +93,16 @@ Route::middleware('auth')->group(function () {
 Route::middleware('auth')->group(function () {
     Route::get('/tracks', [TrackController::class, 'index'])->name('tracks.index');
     Route::get('/tracks/{track}', [TrackController::class, 'show'])->name('tracks.show');
-    Route::get('/tracks/{track}/stream', [TrackController::class, 'stream'])->name('tracks.stream');
-    Route::get('/tracks/{track}/peaks', [TrackController::class, 'peaks'])->name('tracks.peaks');
-    Route::get('/tracks/{track}/download', [TrackController::class, 'download'])->name('tracks.download');
+    Route::get('/tracks/{track}/channels/{channel}/stream', [TrackController::class, 'streamChannel'])->whereNumber('channel')->name('tracks.channels.stream');
+    Route::get('/tracks/{track}/channels/{channel}/peaks', [TrackController::class, 'peaksChannel'])->whereNumber('channel')->name('tracks.channels.peaks');
     Route::patch('/tracks/{track}', [TrackController::class, 'update'])->name('tracks.update');
-    Route::post('/tracks/upload-url', [TrackController::class, 'uploadUrl'])->name('tracks.upload-url');
-    Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');
 
-    // Multipart upload for multi-gigabyte files: the browser drives parts
-    // directly to S3 against these signing/finalising endpoints.
-    Route::post('/tracks/multipart', [TrackController::class, 'createMultipart'])->name('tracks.multipart.create');
-    Route::get('/tracks/multipart/sign', [TrackController::class, 'signPart'])->name('tracks.multipart.sign');
-    Route::post('/tracks/multipart/complete', [TrackController::class, 'completeMultipart'])->name('tracks.multipart.complete');
-    Route::post('/tracks/multipart/abort', [TrackController::class, 'abortMultipart'])->name('tracks.multipart.abort');
+    // Browser-encoded multi-channel upload: init mints per-channel Opus + peaks
+    // PUT targets, the browser uploads to them, then store() finalises the set
+    // into Track + TrackChannel rows. uploadPut is the local-disk PUT target
+    // (S3 presigns direct to the bucket instead).
+    Route::post('/tracks/channels/init', [TrackController::class, 'initChannels'])->name('tracks.channels.init');
+    Route::put('/tracks/upload', [TrackController::class, 'uploadPut'])->middleware('signed')->name('tracks.upload-put');
     Route::post('/tracks/cleanup', [TrackController::class, 'cleanup'])->name('tracks.cleanup');
     Route::post('/tracks', [TrackController::class, 'store'])->name('tracks.store');
     Route::delete('/tracks/{track}', [TrackController::class, 'destroy'])->name('tracks.destroy');

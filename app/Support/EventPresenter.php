@@ -59,10 +59,12 @@ class EventPresenter
             'id' => $track->id,
             'name' => $track->original_name,
             'duration_seconds' => $track->duration_seconds,
-            'peaks_ready' => $track->peaks_ready,
+            // "Ready" tracks have been transcoded into per-channel mono Opus.
+            // The event listing doesn't preview audio inline (clicking a track
+            // takes you to the player); per-channel URLs live on the player
+            // payload, not here.
+            'ready' => $track->channels()->exists(),
             'show_url' => ($ctx->trackShow)($track),
-            'stream_url' => $this->tracks->playbackUrl($track, ($ctx->trackStream)($track), $ctx->shared),
-            'stream_cross_origin' => $this->tracks->streamCrossOrigin(),
         ];
     }
 

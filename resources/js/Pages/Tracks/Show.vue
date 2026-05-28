@@ -93,10 +93,18 @@ const newTemplateName = ref('');
 
 let ws = null;
 let audioCtx = null;
-let audioEl = null;
+// One <audio> per channel — each plays a mono Opus stream and feeds its own
+// Web Audio lane. Element 0 is the playhead: wavesurfer drives it directly,
+// and its play/pause/seek events broadcast to the other N-1 elements so they
+// stay aligned. A drift watchdog catches any divergence that creeps in over
+// long playback (the /sync-test page measured this at <1 ms in practice).
+let audioEls = [];
 let gainNodes = [];
 let panners = [];
 let pollTimer = null;
+let syncWatchdog = null;
+const SYNC_THRESHOLD_SECONDS = 0.05; // 50 ms; anything beyond is audible.
+const SYNC_INTERVAL_MS = 200;
 
 const channelCount = () => props.track.channels_count ?? 0;
 
@@ -129,20 +137,17 @@ const cssVar = (name, fallback) => {
     return v || fallback;
 };
 
-// Split the media element into one gain-controlled lane per channel, then fold
-// every channel down into the stereo output. A plain <audio> element only
-// exposes a single master volume, so per-channel faders require the Web Audio
-// graph. Each lane runs through a (currently centered) StereoPanner so all
-// channels reach both L and R — merging into a >2-channel bus would let the
-// stereo destination drop everything past the first two. Per-channel panning
-// is a later step: the panner nodes are already in place for it.
-const setupMixer = (audioEl, channels, corsOk) => {
+// Build one Web Audio lane per <audio> element: source → gain → panner →
+// destination, plus an analyser tap on the gain output for the peak meter.
+// Every channel is already mono (it has its own Opus file), so no
+// ChannelSplitter is needed — N independent sources sum at the destination.
+//
+// Routing CORS-tainted media elements through Web Audio would silently mute
+// them, so we skip the graph entirely if the source can't be read off-origin
+// and let each element play "raw" without per-channel control.
+const setupMixer = (audioElsLocal, channels, corsOk) => {
     const Ctx = window.AudioContext || window.webkitAudioContext;
 
-    // Skip the graph when there's no Web Audio, nothing to split, or the source
-    // isn't readable cross-origin. Routing a CORS-tainted element through Web
-    // Audio would silently mute it, so in that case we leave the element to play
-    // on its own — audible, just without per-channel faders.
     if (!Ctx || channels < 1 || !corsOk) {
         mixerUnavailable.value = true;
         return;
@@ -150,17 +155,15 @@ const setupMixer = (audioEl, channels, corsOk) => {
 
     try {
         audioCtx = new Ctx();
-        const source = audioCtx.createMediaElementSource(audioEl);
-        const splitter = audioCtx.createChannelSplitter(channels);
-
-        source.connect(splitter);
 
         for (let i = 0; i < channels; i++) {
+            const source = audioCtx.createMediaElementSource(audioElsLocal[i]);
+
             const gain = audioCtx.createGain();
             gain.gain.value = 1;
 
             const panner = audioCtx.createStereoPanner();
-            panner.pan.value = 0; // centered for now; per-channel pan comes later
+            panner.pan.value = 0;
 
             // Post-fader peak meter tap. Small FFT — we only need time-domain
             // peak, not a spectrum, so 256 samples is plenty and cheap.
@@ -168,7 +171,7 @@ const setupMixer = (audioEl, channels, corsOk) => {
             analyser.fftSize = 256;
             analyser.smoothingTimeConstant = 0;
 
-            splitter.connect(gain, i, 0);
+            source.connect(gain);
             gain.connect(panner);
             gain.connect(analyser);
             panner.connect(audioCtx.destination);
@@ -633,35 +636,50 @@ const copyShareUrl = async () => {
     }
 };
 
-// Whether the stream's bytes are readable from this origin. Same-origin routes
-// always are; an off-origin presigned (S3/R2) URL depends on the bucket's CORS,
-// so probe it with a one-byte ranged request that mirrors how the player reads.
+// Whether the per-channel streams are readable from this origin. Same-origin
+// routes always are; an off-origin presigned URL (R2/S3) depends on the
+// bucket's CORS. Probing channel 0 is enough — every channel rides the same
+// bucket policy.
 const streamReachable = async () => {
     if (props.track.stream_cross_origin !== 'anonymous') return true;
+    const url = props.track.channels?.[0]?.stream_url;
+    if (!url) return false;
     try {
-        const res = await fetch(props.track.stream_url, { headers: { Range: 'bytes=0-0' } });
+        const res = await fetch(url, { headers: { Range: 'bytes=0-0' } });
         return res.ok || res.status === 206;
     } catch {
         return false; // CORS-blocked or unreachable
     }
 };
 
-// Pull the peaks envelope from object storage. Returns null on any failure —
-// the waveform then renders empty rather than failing the whole page, and the
-// regenerate path is `tracks:reprocess` on the server.
+/**
+ * Fetch one peaks JSON per channel in parallel and shape the result for
+ * wavesurfer's splitChannels rendering: an array of flat [max, min, …]
+ * arrays, one per channel, in channel-index order. Any channel that fails
+ * loads as an empty array so the waveform draws a flat line rather than
+ * blowing up the whole page (regenerate path: `tracks:reprocess`).
+ *
+ * @returns {Promise<number[][]>}  one envelope per channel, possibly empty
+ */
 const loadPeaks = async () => {
-    if (!props.track.peaks_url) return null;
-    try {
-        const res = await fetch(props.track.peaks_url, {
-            // Owner pages get a presigned (no-cookies) URL; share/local routes
-            // are same-origin and need the session cookie.
-            credentials: props.track.stream_cross_origin === 'anonymous' ? 'omit' : 'include',
-        });
-        if (!res.ok) return null;
-        return await res.json();
-    } catch {
-        return null;
-    }
+    const list = props.track.channels ?? [];
+    if (list.length === 0) return [];
+
+    const credentials = props.track.stream_cross_origin === 'anonymous' ? 'omit' : 'include';
+
+    const fetchOne = async (channel) => {
+        if (!channel?.peaks_url) return [];
+        try {
+            const res = await fetch(channel.peaks_url, { credentials });
+            if (!res.ok) return [];
+            const body = await res.json();
+            return Array.isArray(body?.peaks) ? body.peaks : [];
+        } catch {
+            return [];
+        }
+    };
+
+    return Promise.all(list.map(fetchOne));
 };
 
 let initStarted = false;
@@ -671,30 +689,38 @@ const initWaveform = async () => {
     initStarted = true; // guard the await window against a second trigger
 
     const channels = channelCount();
+    const channelMeta = props.track.channels ?? [];
+    if (channels === 0 || channelMeta.length !== channels) {
+        loadError.value = 'No channel streams available for this track.';
+        return;
+    }
 
-    // Fetch the peaks envelope from object storage in parallel with the CORS
-    // probe. Peaks used to ride inline in the Inertia payload, but they can be
-    // MB-large per track and would balloon the HTML response; pulling them
-    // separately lets the page render while the waveform data is on the wire.
-    const [corsOk, envelope] = await Promise.all([
+    // Pull peaks for every channel in parallel with the CORS probe. The probe
+    // gates whether we can route audio through Web Audio at all (a tainted
+    // MediaElementSource silently mutes).
+    const [corsOk, envelopes] = await Promise.all([
         streamReachable(),
         loadPeaks(),
     ]);
 
-    peaksChannels.value = envelope?.channels ?? null;
+    peaksChannels.value = envelopes;
 
-    // Stream playback through a media element so large files seek via HTTP
-    // range requests instead of being fully downloaded; the waveform itself
-    // renders immediately from the pre-computed peaks.
-    const audio = new Audio();
-    audio.preload = 'metadata';
-    if (corsOk) audio.crossOrigin = props.track.stream_cross_origin;
-    audio.src = props.track.stream_url;
+    // One <audio> per channel. Element 0 is the playhead — wavesurfer drives
+    // it directly via the `media` option, and its play/pause/seeking events
+    // are mirrored onto the rest in the watchdog setup below. All elements
+    // share an AudioContext built once by setupMixer().
+    audioEls = channelMeta.map((channel) => {
+        const audio = new Audio();
+        audio.preload = 'metadata';
+        if (corsOk) audio.crossOrigin = props.track.stream_cross_origin;
+        audio.src = channel.stream_url;
+        return audio;
+    });
 
     ws = WaveSurfer.create({
         container: waveformEl.value,
-        media: audio,
-        peaks: peaksChannels.value ?? undefined,
+        media: audioEls[0],
+        peaks: peaksChannels.value,
         duration: props.track.duration_seconds ?? undefined,
         splitChannels: channels > 1 ? Array.from({ length: channels }, () => ({})) : undefined,
         height: waveformHeight(channels, waveformExpanded.value),
@@ -708,10 +734,10 @@ const initWaveform = async () => {
         normalize: false,
     });
 
-    setupMixer(audio, channels, corsOk);
+    setupMixer(audioEls, channels, corsOk);
+    bindChannelSync();
 
-    audioEl = audio;
-    audio.addEventListener('canplay', () => { audioReady.value = true; });
+    audioEls[0].addEventListener('canplay', () => { audioReady.value = true; });
 
     ws.on('ready', () => { isReady.value = true; });
     ws.on('play', () => {
@@ -726,6 +752,51 @@ const initWaveform = async () => {
     ws.on('ready', () => {
         observeControlsVisibility();
     });
+};
+
+/**
+ * Mirror the playhead element's transport onto the rest, and start a soft
+ * watchdog that snaps any straggler back to the playhead if drift exceeds the
+ * threshold. The sync-test page measured drift well below this threshold on
+ * Chrome, so the watchdog is mostly insurance — but the per-event sync is the
+ * actual mechanism that keeps the channels lined up across user actions.
+ */
+const bindChannelSync = () => {
+    if (audioEls.length <= 1) return;
+    const [primary, ...followers] = audioEls;
+
+    primary.addEventListener('play', () => {
+        for (const el of followers) {
+            try { el.currentTime = primary.currentTime; el.play().catch(() => {}); } catch {}
+        }
+        if (!syncWatchdog) syncWatchdog = setInterval(driftCheck, SYNC_INTERVAL_MS);
+    });
+    primary.addEventListener('pause', () => {
+        for (const el of followers) { try { el.pause(); } catch {} }
+        clearInterval(syncWatchdog);
+        syncWatchdog = null;
+    });
+    primary.addEventListener('seeking', () => {
+        for (const el of followers) { try { el.currentTime = primary.currentTime; } catch {} }
+    });
+    primary.addEventListener('ratechange', () => {
+        for (const el of followers) { try { el.playbackRate = primary.playbackRate; } catch {} }
+    });
+    primary.addEventListener('ended', () => {
+        clearInterval(syncWatchdog);
+        syncWatchdog = null;
+    });
+};
+
+const driftCheck = () => {
+    if (audioEls.length <= 1) return;
+    const ref = audioEls[0].currentTime;
+    for (let i = 1; i < audioEls.length; i++) {
+        const el = audioEls[i];
+        if (Math.abs(el.currentTime - ref) > SYNC_THRESHOLD_SECONDS) {
+            try { el.currentTime = ref; } catch {}
+        }
+    }
 };
 
 // Show a floating play/time bar when the main controls scroll off-screen.
@@ -801,7 +872,7 @@ onMounted(() => {
     narrowMq = window.matchMedia('(max-width: 640px)');
     isNarrow.value = narrowMq.matches;
     narrowMq.addEventListener('change', onNarrowChange);
-    if (props.track.peaks_ready) {
+    if (props.track.ready) {
         nextTick(initWaveform);
     } else {
         // Peaks are generated by a queued job; poll until they land.
@@ -817,7 +888,7 @@ watch(waveformExpanded, (expanded) => {
 });
 
 // When polling refreshes the prop and peaks become ready, build the player.
-watch(() => props.track.peaks_ready, (ready) => {
+watch(() => props.track.ready, (ready) => {
     if (ready && !ws) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -833,11 +904,19 @@ onBeforeUnmount(() => {
     controlsObserver?.disconnect();
     controlsObserver = null;
     clearInterval(pollTimer);
+    clearInterval(syncWatchdog);
+    syncWatchdog = null;
     clearTimeout(savedTimer);
     clearTimeout(mixStatusTimer);
     ws?.destroy();
     ws = null;
-    audioEl = null;
+    // Stop the follower elements explicitly — wavesurfer's destroy only pauses
+    // its own media (element 0). Clear src so the browser releases the
+    // underlying decoders.
+    for (const el of audioEls) {
+        try { el.pause(); el.removeAttribute('src'); el.load(); } catch {}
+    }
+    audioEls = [];
     audioCtx?.close();
     audioCtx = null;
     gainNodes = [];
@@ -876,17 +955,6 @@ onBeforeUnmount(() => {
                 <Tag v-if="!canEdit" value="Shared" severity="info" />
                 <Button
                     v-if="canEdit"
-                    class="download-btn"
-                    icon="pi pi-download"
-                    label="Download"
-                    severity="secondary"
-                    outlined
-                    size="small"
-                    :as="'a'"
-                    :href="route('tracks.download', track.id)"
-                />
-                <Button
-                    v-if="canEdit"
                     :icon="shareUrl ? 'pi pi-link' : 'pi pi-share-alt'"
                     :label="shareUrl ? 'Sharing' : 'Share'"
                     :severity="shareUrl ? 'success' : 'secondary'"
@@ -899,7 +967,7 @@ onBeforeUnmount(() => {
 
         <div class="stack">
             <div class="meta-strip">
-                <Tag v-if="track.peaks_ready" severity="success" value="Ready" />
+                <Tag v-if="track.ready" severity="success" value="Ready" />
                 <Tag v-else severity="warn" value="Processing" />
                 <span class="meta-chip"><i class="pi pi-sliders-v" /> {{ channelCount() || '—' }} ch</span>
                 <span class="meta-chip"><i class="pi pi-clock" /> {{ formatTime(track.duration_seconds) }}</span>
@@ -913,7 +981,7 @@ onBeforeUnmount(() => {
                         Couldn't load audio: {{ loadError }}
                     </Message>
 
-                    <template v-if="track.peaks_ready">
+                    <template v-if="track.ready">
                         <div class="waveform-wrap">
                             <div ref="waveformEl" class="waveform" :class="{ 'is-loading': !isReady || !audioReady }" />
                             <div v-if="!isReady || !audioReady" class="waveform-loading" role="status" aria-live="polite">
@@ -965,7 +1033,7 @@ onBeforeUnmount(() => {
                 </template>
             </Card>
 
-            <Card v-if="track.peaks_ready && levels.length">
+            <Card v-if="track.ready && levels.length">
                 <template #title>
                     <div class="mixer-header">
                         <span class="mixer-title">Channel mixer</span>
@@ -1135,14 +1203,14 @@ onBeforeUnmount(() => {
                 </template>
             </Card>
 
-            <Message v-else-if="track.peaks_ready && mixerUnavailable" severity="warn" :closable="false">
+            <Message v-else-if="track.ready && mixerUnavailable" severity="warn" :closable="false">
                 Per-channel faders aren't available for this audio source (the browser couldn't access its channels).
             </Message>
 
         </div>
 
         <Transition name="mini-fade">
-            <div v-if="showMiniTransport && track.peaks_ready" class="mini-transport" role="region" aria-label="Floating transport">
+            <div v-if="showMiniTransport && track.ready" class="mini-transport" role="region" aria-label="Floating transport">
                 <Button
                     :icon="isPlaying ? 'pi pi-pause' : 'pi pi-play'"
                     rounded
@@ -1276,7 +1344,6 @@ onBeforeUnmount(() => {
 .save-dialog label { font-size: 0.875rem; font-weight: 500; }
 .save-dialog .p-inputtext { width: 100%; }
 .save-dialog-hint { margin: 0.25rem 0 0; font-size: 0.8125rem; color: var(--p-text-muted-color); }
-.download-btn { margin-left: auto; }
 .share-dialog { display: flex; flex-direction: column; gap: 0.75rem; }
 .share-dialog-hint { margin: 0; font-size: 0.875rem; color: var(--p-text-muted-color); }
 .share-link-row { display: flex; gap: 0.5rem; }

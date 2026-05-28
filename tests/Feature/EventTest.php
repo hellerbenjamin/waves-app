@@ -93,7 +93,7 @@ class EventTest extends TestCase
 
         $user = User::factory()->create();
         $event = Event::factory()->for($user)->create();
-        Track::factory()->for($user)->withPeaks()->create(['event_id' => $event->id]);
+        Track::factory()->for($user)->withChannels()->create(['event_id' => $event->id]);
         Media::factory()->for($user)->withThumb()->create(['event_id' => $event->id]);
 
         $this->actingAs($user)
@@ -215,16 +215,16 @@ class EventTest extends TestCase
             ->assertNotFound();
     }
 
-    public function test_shared_track_stream_redirects_for_member_on_s3(): void
+    public function test_shared_track_channel_stream_redirects_for_member_on_s3(): void
     {
         $event = Event::factory()->shared()->create();
-        $track = Track::factory()->for($event->user)->create(['event_id' => $event->id]);
+        $track = Track::factory()->for($event->user)->withChannels()->create(['event_id' => $event->id]);
 
         $disk = Mockery::mock(AwsS3V3Adapter::class);
         $disk->shouldReceive('temporaryUrl')->once()->andReturn('https://s3.example/signed');
         Storage::shouldReceive('disk')->andReturn($disk);
 
-        $this->get("/events/share/{$event->share_token}/tracks/{$track->id}/stream")
+        $this->get("/events/share/{$event->share_token}/tracks/{$track->id}/channels/0/stream")
             ->assertRedirect('https://s3.example/signed');
     }
 
