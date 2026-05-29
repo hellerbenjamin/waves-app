@@ -10,7 +10,7 @@
  * WebM/Opus Blob and a flat [max, min, max, min, …] peaks array in [-1, 1].
  */
 
-import { readWavHeaders, locateOnStitched } from './wav.js';
+import { readWavHeaders, locateOnStitched, sampleDecoder } from './wav.js';
 import { MonoOpusEncoder } from './opusEncode.js';
 
 const PEAK_BUCKETS = 4000;
@@ -150,20 +150,4 @@ export async function encodeStitchedRegionChannels(stitched, region, opts = {}) 
         durationSeconds: processedFrames / sampleRate,
         channels: blobs.map((blob, c) => ({ blob, peaks: peaks[c] })),
     };
-}
-
-/** Branch-once PCM reader: DataView byte offset → normalised float in [-1, 1]. */
-function sampleDecoder(bitsPerSample) {
-    if (bitsPerSample === 16) {
-        return (view, off) => view.getInt16(off, true) / 32768;
-    }
-    if (bitsPerSample === 24) {
-        return (view, off) => {
-            const v0 = view.getUint8(off);
-            const v1 = view.getUint8(off + 1);
-            const v2 = view.getInt8(off + 2);
-            return ((v2 << 16) | (v1 << 8) | v0) / 8388608;
-        };
-    }
-    return (view, off) => view.getInt32(off, true) / 2147483648;
 }

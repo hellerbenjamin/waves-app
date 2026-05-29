@@ -157,6 +157,26 @@ function writeFourCC(bytes, offset, s) {
 }
 
 /**
+ * Branch-once PCM reader: returns a function mapping a DataView byte offset to
+ * a normalised float in [-1, 1] for the given bit depth. Shared by the encoder
+ * (per-channel Opus) and the streaming preview player.
+ */
+export function sampleDecoder(bitsPerSample) {
+    if (bitsPerSample === 16) {
+        return (view, off) => view.getInt16(off, true) / 32768;
+    }
+    if (bitsPerSample === 24) {
+        return (view, off) => {
+            const v0 = view.getUint8(off);
+            const v1 = view.getUint8(off + 1);
+            const v2 = view.getInt8(off + 2);
+            return ((v2 << 16) | (v1 << 8) | v0) / 8388608;
+        };
+    }
+    return (view, off) => view.getInt32(off, true) / 2147483648;
+}
+
+/**
  * Byte offset (from the start of the file) of the PCM frame at `seconds`,
  * snapped to a frame boundary so a segment slice never starts mid-sample.
  */

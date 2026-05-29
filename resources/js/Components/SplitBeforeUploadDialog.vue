@@ -10,6 +10,7 @@ import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { readWavHeader, buildSegmentBlob } from '@/lib/wav.js';
 import { detectSilences, invertToRegions } from '@/lib/wavSilence.js';
+import { PcmStreamPlayer } from '@/lib/pcmStreamPlayer.js';
 
 /**
  * Split a long WAV File into per-region Blobs entirely in the browser, then
@@ -44,9 +45,10 @@ const regions = ref([]); // [{ id, start, end, name }]
 const baseName = ref('');
 
 // Local playback so the user can audition regions before labelling them.
-// The source File is exposed to wavesurfer as a Blob URL — no upload, no
-// re-decode (peaks + duration are still seeded from our worker scan).
-const playerUrl = shallowRef(null);
+// A streaming Web Audio player reads PCM windows straight from the source File
+// on demand (no upload, no 4 GB cap), so even an RF64 recording auditions.
+// wavesurfer runs media-less here: it draws the waveform from our scanned peaks
+// and we drive its cursor from the player's clock.
 const isPlaying = ref(false);
 const currentTime = ref(0);
 const activeRegionId = ref(null);
@@ -60,14 +62,8 @@ let regionsPlugin = null;
 let regionDragUnsub = null;
 let suppressRegionEvents = false;
 
-// A plain <audio> element only outputs the first two channels of a multichannel
-// WAV, so we splice a Web Audio graph between wavesurfer's media element and
-// the speakers: ChannelSplitter → one gain per channel → centered panner →
-// destination. Every channel ends up audible in both L and R. Mirrors the
-// approach in Pages/Tracks/Show.vue (minus the per-channel mixer UI).
-let audioCtx = null;
-let audioSource = null;
-let audioNodes = []; // [{ gain, panner }] retained for clean disconnect
+// Streaming PCM player; built once the header is parsed (see renderWaveform).
+let player = null;
 
 // Heavy scan runs once in a Web Worker; the result is cached so re-detection
 // on every slider tick is a fast in-memory pass on the main thread.
@@ -109,10 +105,6 @@ watch(() => props.visible, async (open) => {
     scanProgress.value = 0;
     errorMessage.value = '';
     baseName.value = (props.file.name || 'Track').replace(/\.[^.]+$/, '') || 'Track';
-
-    // Object URL stays alive for the whole dialog session so the player can
-    // seek freely. teardown() revokes it.
-    playerUrl.value = URL.createObjectURL(props.file);
 
     try {
         header.value = await readWavHeader(props.file);
@@ -204,10 +196,9 @@ const renderWaveform = () => {
     regionsPlugin = RegionsPlugin.create();
     ws = WaveSurfer.create({
         container: waveformEl.value,
-        // Local Blob URL of the source File so playback works without an
-        // upload; the precomputed peaks + duration skip wavesurfer's own
-        // decode pass on multi-gigabyte files.
-        url: playerUrl.value,
+        // Media-less: peaks + duration render the waveform and seed getDuration()
+        // immediately, so the cursor and regions position correctly with no
+        // <audio> element. Audio comes from the streaming player below.
         peaks: [peaks.value],
         duration: header.value.durationSeconds,
         interact: true,
@@ -225,32 +216,15 @@ const renderWaveform = () => {
     isPlaying.value = false;
     currentTime.value = 0;
 
-    // wavesurfer wires the media element synchronously, so we can attach the
-    // splitter graph immediately and it's in place by the time the user hits
-    // play (createMediaElementSource has to happen before playback starts to
-    // route the audio).
-    attachMultichannelGraph();
+    buildPlayer();
 
-    // The regions plugin positions regions as a fraction of getDuration(),
-    // which reads from the <audio> element and returns 0 while the Blob URL
-    // is still loading — so any region added before 'ready' renders piled at
-    // the start. Re-sync once the media is decoded so positions snap to the
-    // real duration. (Deleting a region after that point already worked
-    // because the deletion triggers the plugin to re-render against the
-    // now-correct duration.)
     ws.on('ready', () => { syncRegionsToWaveform(); });
 
-    ws.on('play', () => { isPlaying.value = true; });
-    ws.on('pause', () => { isPlaying.value = false; });
-    ws.on('finish', () => { isPlaying.value = false; });
-    ws.on('timeupdate', (t) => {
-        currentTime.value = t;
-        // Drop the "active region" highlight when playback leaves it so the
-        // play/pause icon on the row reverts to play.
-        if (activeRegionId.value) {
-            const r = regions.value.find((x) => x.id === activeRegionId.value);
-            if (r && (t < r.start || t > r.end)) activeRegionId.value = null;
-        }
+    // Click-to-seek: wavesurfer moves its own cursor and reports the target
+    // time; we point the streaming player at it (and exit region mode).
+    ws.on('interaction', (time) => {
+        activeRegionId.value = null;
+        player?.seek(time);
     });
 
     bindRegionEvents();
@@ -260,63 +234,55 @@ const renderWaveform = () => {
     regionDragUnsub = regionsPlugin.enableDragSelection({ color: 'rgba(99, 102, 241, 0.15)' });
 };
 
-const attachMultichannelGraph = () => {
-    const channels = header.value?.channels ?? 0;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const audioEl = ws?.getMediaElement?.();
-    if (!Ctx || !audioEl || channels < 1) return;
-
-    try {
-        audioCtx = new Ctx();
-        audioSource = audioCtx.createMediaElementSource(audioEl);
-        const splitter = audioCtx.createChannelSplitter(channels);
-        audioSource.connect(splitter);
-
-        for (let i = 0; i < channels; i++) {
-            const gain = audioCtx.createGain();
-            gain.gain.value = 1;
-            const panner = audioCtx.createStereoPanner();
-            panner.pan.value = 0; // sum each channel equally into L and R
-
-            splitter.connect(gain, i, 0);
-            gain.connect(panner);
-            panner.connect(audioCtx.destination);
-
-            audioNodes.push({ gain, panner });
-        }
-    } catch (e) {
-        // If we can't build the graph (e.g. a second createMediaElementSource
-        // on the same element), playback still works through the native
-        // element — just limited to its first two channels.
-        audioCtx = null;
-        audioSource = null;
-        audioNodes = [];
-    }
+// Build the streaming player from the parsed header. The source File is a
+// single-source stitched timeline as far as the player is concerned.
+const buildPlayer = () => {
+    const h = header.value;
+    if (!h) return;
+    player?.destroy();
+    const descriptor = {
+        sources: [{ file: props.file, header: h, startSeconds: 0, endSeconds: h.durationSeconds }],
+        format: {
+            sampleRate: h.sampleRate,
+            channels: h.channels,
+            bitsPerSample: h.bitsPerSample,
+            bytesPerFrame: h.bytesPerFrame,
+        },
+        totalDurationSeconds: h.durationSeconds,
+    };
+    player = new PcmStreamPlayer(descriptor, {
+        onTime: (t) => {
+            currentTime.value = t;
+            ws?.setTime(t); // drive the (media-less) cursor
+            // Drop the active-region highlight once playback leaves it.
+            if (activeRegionId.value) {
+                const r = regions.value.find((x) => x.id === activeRegionId.value);
+                if (r && (t < r.start - 0.05 || t > r.end + 0.05)) activeRegionId.value = null;
+            }
+        },
+        onState: (p) => { isPlaying.value = p; },
+    });
 };
 
 const togglePlay = () => {
-    if (!ws) return;
-    // AudioContext starts suspended until a user gesture; resume on the
-    // play click so the multichannel graph actually outputs sound.
-    audioCtx?.resume?.();
+    if (!player) return;
     activeRegionId.value = null; // full-track play, not a region
-    ws.playPause();
+    if (player.isPlaying) player.pause();
+    else player.play();
 };
 
-// Play just the named region: seek to its start, play, and stop at its end.
-// wavesurfer-regions exposes a per-region .play() that handles the stop edge.
+// Play just the named region: the player seeks to its start and stops at its
+// end. Re-clicking the active region pauses it.
 const playRegion = (id) => {
     const r = regions.value.find((x) => x.id === id);
-    const regionObj = regionsPlugin?.getRegions().find((rr) => rr.id === id);
-    if (!ws || !r || !regionObj) return;
+    if (!player || !r) return;
 
     if (activeRegionId.value === id && isPlaying.value) {
-        ws.pause();
+        player.pause();
         return;
     }
-    audioCtx?.resume?.();
     activeRegionId.value = id;
-    regionObj.play();
+    player.playRange(r.start, r.end);
 };
 
 const bindRegionEvents = () => {
@@ -383,26 +349,13 @@ const teardown = () => {
     framesPerWindowCache = 0;
     regionDragUnsub?.();
     regionDragUnsub = null;
-    // Disconnect the multichannel graph before destroying ws — leaving a
-    // MediaElementSource attached to a closed context can wedge the element
-    // for any subsequent open.
-    audioNodes.forEach(({ gain, panner }) => {
-        try { gain.disconnect(); } catch {}
-        try { panner.disconnect(); } catch {}
-    });
-    audioNodes = [];
-    try { audioSource?.disconnect(); } catch {}
-    audioSource = null;
-    audioCtx?.close?.().catch(() => {});
-    audioCtx = null;
+
+    player?.destroy();
+    player = null;
 
     ws?.destroy();
     ws = null;
     regionsPlugin = null;
-    if (playerUrl.value) {
-        URL.revokeObjectURL(playerUrl.value);
-        playerUrl.value = null;
-    }
     isPlaying.value = false;
     currentTime.value = 0;
     activeRegionId.value = null;

@@ -11,6 +11,7 @@ import TimelinePlugin from 'wavesurfer.js/dist/plugins/timeline.esm.js';
 import ZoomPlugin from 'wavesurfer.js/dist/plugins/zoom.esm.js';
 import Slider from 'primevue/slider';
 import { readWavHeaders, buildStitchedSegmentBlob } from '@/lib/wav.js';
+import { PcmStreamPlayer } from '@/lib/pcmStreamPlayer.js';
 
 /**
  * Stitch multiple WAV files end-to-end into one virtual timeline and let the
@@ -46,8 +47,6 @@ const peaks = ref([]); // Float32Array → wavesurfer accepts both
 const regions = ref([]); // [{ id, start, end, name }]
 const baseName = ref('');
 
-const playerUrl = shallowRef(null); // Blob URL of the synthesized stitched WAV
-const playbackUnavailable = ref(false);
 const isPlaying = ref(false);
 const currentTime = ref(0);
 const activeRegionId = ref(null);
@@ -64,12 +63,10 @@ let regionsPlugin = null;
 let regionDragUnsub = null;
 let suppressRegionEvents = false;
 
-// Splice a multichannel-aware graph between wavesurfer's media element and
-// the speakers so >2-channel files don't get downmixed to L/R. Matches the
+// Streaming PCM player reading the source files on demand — no synthesized
+// preview blob, so the combined recording can be any size. Matches the
 // approach in SplitBeforeUploadDialog.
-let audioCtx = null;
-let audioSource = null;
-let audioNodes = [];
+let player = null;
 
 let scanWorker = null;
 
@@ -127,7 +124,6 @@ watch(() => props.visible, async (open) => {
     scanProgress.value = 0;
     errorMessage.value = '';
     baseName.value = (props.files[0]?.name || 'Recording').replace(/\.[^.]+$/, '') || 'Recording';
-    playbackUnavailable.value = false;
 
     try {
         stitched.value = await readWavHeaders(props.files);
@@ -135,19 +131,6 @@ watch(() => props.visible, async (open) => {
         phase.value = 'error';
         errorMessage.value = e?.message || String(e);
         return;
-    }
-
-    // Build a synthesized full-timeline WAV Blob for playback. Zero PCM copies
-    // — it's a header in front of File.slice() views. If the total PCM would
-    // overflow the 32-bit RIFF size, fall back to no-preview mode (the
-    // splitting math still works; we just don't play the stitched recording
-    // back inside the dialog).
-    try {
-        const blob = buildStitchedSegmentBlob(stitched.value, { start: 0, end: stitched.value.totalDurationSeconds });
-        playerUrl.value = URL.createObjectURL(blob);
-    } catch {
-        playerUrl.value = null;
-        playbackUnavailable.value = true;
     }
 
     runScanInWorker();
@@ -229,7 +212,8 @@ const renderWaveform = () => {
         normalize: false,
         plugins: [regionsPlugin, timelinePlugin, zoomPlugin],
     };
-    if (playerUrl.value) config.url = playerUrl.value;
+    // Media-less: the waveform renders from scanned peaks + duration; audio is
+    // produced by the streaming player, which reads the source files directly.
     ws = WaveSurfer.create(config);
 
     // Keep our local slider in sync if the user zooms with the wheel.
@@ -241,7 +225,7 @@ const renderWaveform = () => {
     isPlaying.value = false;
     currentTime.value = 0;
 
-    if (playerUrl.value) attachMultichannelGraph();
+    buildPlayer();
 
     ws.on('ready', () => {
         syncRegionsToWaveform();
@@ -250,15 +234,12 @@ const renderWaveform = () => {
     // Markers live inside wavesurfer's wrapper, which is rebuilt on decode —
     // re-install whenever wavesurfer re-renders so they don't get orphaned.
     ws.on('redraw', () => { installBoundaryMarkers(); });
-    ws.on('play', () => { isPlaying.value = true; });
-    ws.on('pause', () => { isPlaying.value = false; });
-    ws.on('finish', () => { isPlaying.value = false; });
-    ws.on('timeupdate', (t) => {
-        currentTime.value = t;
-        if (activeRegionId.value) {
-            const r = regions.value.find((x) => x.id === activeRegionId.value);
-            if (r && (t < r.start || t > r.end)) activeRegionId.value = null;
-        }
+
+    // Click-to-seek: wavesurfer moves its cursor and reports the time; point
+    // the streaming player at it and exit region mode.
+    ws.on('interaction', (time) => {
+        activeRegionId.value = null;
+        player?.seek(time);
     });
 
     bindRegionEvents();
@@ -268,33 +249,22 @@ const renderWaveform = () => {
     regionDragUnsub = regionsPlugin.enableDragSelection({ color: 'rgba(99, 102, 241, 0.15)' });
 };
 
-const attachMultichannelGraph = () => {
-    const channels = stitched.value?.format?.channels ?? 0;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const audioEl = ws?.getMediaElement?.();
-    if (!Ctx || !audioEl || channels < 1) return;
-
-    try {
-        audioCtx = new Ctx();
-        audioSource = audioCtx.createMediaElementSource(audioEl);
-        const splitter = audioCtx.createChannelSplitter(channels);
-        audioSource.connect(splitter);
-
-        for (let i = 0; i < channels; i++) {
-            const gain = audioCtx.createGain();
-            gain.gain.value = 1;
-            const panner = audioCtx.createStereoPanner();
-            panner.pan.value = 0;
-            splitter.connect(gain, i, 0);
-            gain.connect(panner);
-            panner.connect(audioCtx.destination);
-            audioNodes.push({ gain, panner });
-        }
-    } catch {
-        audioCtx = null;
-        audioSource = null;
-        audioNodes = [];
-    }
+// Build the streaming player from the stitched timeline. `stitched.value` is
+// already the {sources, format, totalDurationSeconds} shape the player wants.
+const buildPlayer = () => {
+    if (!stitched.value) return;
+    player?.destroy();
+    player = new PcmStreamPlayer(stitched.value, {
+        onTime: (t) => {
+            currentTime.value = t;
+            ws?.setTime(t); // drive the (media-less) cursor
+            if (activeRegionId.value) {
+                const r = regions.value.find((x) => x.id === activeRegionId.value);
+                if (r && (t < r.start - 0.05 || t > r.end + 0.05)) activeRegionId.value = null;
+            }
+        },
+        onState: (p) => { isPlaying.value = p; },
+    });
 };
 
 const applyZoom = () => {
@@ -337,24 +307,21 @@ const installBoundaryMarkers = () => {
 };
 
 const togglePlay = () => {
-    if (!ws || !playerUrl.value) return;
-    audioCtx?.resume?.();
+    if (!player) return;
     activeRegionId.value = null;
-    ws.playPause();
+    if (player.isPlaying) player.pause();
+    else player.play();
 };
 
 const playRegion = (id) => {
-    if (!playerUrl.value) return;
     const r = regions.value.find((x) => x.id === id);
-    const regionObj = regionsPlugin?.getRegions().find((rr) => rr.id === id);
-    if (!ws || !r || !regionObj) return;
+    if (!player || !r) return;
     if (activeRegionId.value === id && isPlaying.value) {
-        ws.pause();
+        player.pause();
         return;
     }
-    audioCtx?.resume?.();
     activeRegionId.value = id;
-    regionObj.play();
+    player.playRange(r.start, r.end);
 };
 
 const bindRegionEvents = () => {
@@ -427,15 +394,8 @@ const teardown = () => {
     regionDragUnsub?.();
     regionDragUnsub = null;
 
-    audioNodes.forEach(({ gain, panner }) => {
-        try { gain.disconnect(); } catch {}
-        try { panner.disconnect(); } catch {}
-    });
-    audioNodes = [];
-    try { audioSource?.disconnect(); } catch {}
-    audioSource = null;
-    audioCtx?.close?.().catch(() => {});
-    audioCtx = null;
+    player?.destroy();
+    player = null;
 
     // Markers were appended inside wavesurfer's wrapper; destroying ws drops
     // that subtree, so just forget our references.
@@ -445,10 +405,6 @@ const teardown = () => {
     ws = null;
     regionsPlugin = null;
 
-    if (playerUrl.value) {
-        URL.revokeObjectURL(playerUrl.value);
-        playerUrl.value = null;
-    }
     isPlaying.value = false;
     currentTime.value = 0;
     activeRegionId.value = null;
@@ -456,7 +412,6 @@ const teardown = () => {
     peaks.value = [];
     stitched.value = null;
     phase.value = 'idle';
-    playbackUnavailable.value = false;
     zoomLevel.value = 1;
 };
 
@@ -531,10 +486,6 @@ const dialogVisible = computed({
                 {{ errorMessage || 'Could not read these WAV files.' }}
             </Message>
 
-            <Message v-if="playbackUnavailable && phase !== 'error'" severity="warn" :closable="false">
-                The combined recording exceeds 4 GB, so audio preview is disabled in this dialog. Splitting still works.
-            </Message>
-
             <div v-if="phase === 'scanning'" class="scan-progress">
                 <p>Scanning audio in the background — your browser stays responsive.</p>
                 <ProgressBar :value="Math.round(scanProgress * 100)" />
@@ -551,7 +502,6 @@ const dialogVisible = computed({
                         :icon="isPlaying && !activeRegionId ? 'pi pi-pause' : 'pi pi-play'"
                         :label="isPlaying && !activeRegionId ? 'Pause' : 'Play'"
                         size="small"
-                        :disabled="!playerUrl"
                         @click="togglePlay"
                     />
                     <span class="transport-time">
@@ -573,7 +523,6 @@ const dialogVisible = computed({
                             text
                             rounded
                             size="small"
-                            :disabled="!playerUrl"
                             :aria-label="`Play song ${i + 1}`"
                             @click="playRegion(r.id)"
                         />
