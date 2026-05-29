@@ -14,11 +14,24 @@ import { encodeWavChannels, encodeStitchedRegionChannels } from '@/lib/encodeCha
  * and upload (last ~30%) so a caller can render one bar per track.
  */
 export function useChannelUpload() {
+    // Each encode spins up one WebCodecs AudioEncoder per channel and reads the
+    // source in large slices. Firing several at once (a multi-file pick) multi-
+    // plies both, and Chrome starts aborting the file reads with a NotReadable-
+    // Error ("permission problems … after a reference to a file was acquired").
+    // Serialise so one recording fully encodes+uploads before the next starts;
+    // the chain survives a failed job so one bad file doesn't stall the rest.
+    let tail = Promise.resolve();
+    const serial = (job) => {
+        const result = tail.then(job, job);
+        tail = result.then(() => {}, () => {});
+        return result;
+    };
+
     const uploadWavFile = (file, meta = {}) =>
-        run(meta, (onProgress) => encodeWavChannels(file, { onProgress }), file.name, meta);
+        serial(() => run(meta, (onProgress) => encodeWavChannels(file, { onProgress }), file.name, meta));
 
     const uploadStitchedRegion = (stitched, region, meta = {}) =>
-        run(meta, (onProgress) => encodeStitchedRegionChannels(stitched, region, { onProgress }), meta.name, meta);
+        serial(() => run(meta, (onProgress) => encodeStitchedRegionChannels(stitched, region, { onProgress }), meta.name, meta));
 
     return { uploadWavFile, uploadStitchedRegion };
 }
