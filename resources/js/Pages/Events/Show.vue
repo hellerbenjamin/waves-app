@@ -191,7 +191,9 @@ const uploadTrackBlob = async (file) => {
         toast?.add({ severity: 'error', summary: 'Unsupported browser', detail: 'Audio upload needs a desktop browser with WebCodecs.', life: 6000 });
         return;
     }
-    const entry = ref({ name: file.name.replace(/\.[^.]+$/, ''), progress: 0, status: 'encoding' });
+    // Starts 'queued'; the first encode progress event flips it to 'encoding'
+    // (uploads are serialised, so a batch waits its turn here).
+    const entry = ref({ name: file.name.replace(/\.[^.]+$/, ''), progress: 0, status: 'queued' });
     trackUploads.value.push(entry.value);
 
     try {

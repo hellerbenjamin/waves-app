@@ -107,7 +107,9 @@ const addUpload = (file) => {
 // outputs funnel through here — the dialog blobs are zero-copy in-browser WAVs
 // that get encoded, never uploaded as WAV.
 const queueForUpload = async (file) => {
-    const entry = ref({ name: file.name.replace(/\.[^.]+$/, ''), progress: 0, status: 'encoding' });
+    // Starts 'queued'; the first encode progress event flips it to 'encoding'
+    // (uploads are serialised, so a batch waits its turn here).
+    const entry = ref({ name: file.name.replace(/\.[^.]+$/, ''), progress: 0, status: 'queued' });
     uploads.value.push(entry.value);
 
     try {
