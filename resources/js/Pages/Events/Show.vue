@@ -25,6 +25,7 @@ import { useChannelUpload } from '@/composables/useChannelUpload.js';
 import { isOpusEncodeSupported } from '@/lib/opusEncode.js';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
 import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
+import QrPosterDialog from '@/Components/QrPosterDialog.vue';
 
 const props = defineProps({
     event: { type: Object, required: true },
@@ -297,6 +298,11 @@ const copyInvite = (invite) => {
     toast.add({ severity: 'success', summary: 'Upload link copied', detail: invite.url, life: 3000 });
 };
 
+// Printable QR poster for an upload link, to show or print at the event.
+const qrInvite = ref(null);
+const qrVisible = ref(false);
+const openQr = (invite) => { qrInvite.value = invite; qrVisible.value = true; };
+
 const revokeInvite = (invite) => confirm.require({
     message: `Revoke this upload link${invite.label ? ` ("${invite.label}")` : ''}? Anyone holding it can no longer upload. Photos and videos already collected stay.`,
     header: 'Revoke upload link',
@@ -328,6 +334,13 @@ const openLightbox = (item) => { lightbox.value = item; };
         :files="pendingTrackStitchedFiles"
         @commit="onTrackStitchedCommit"
         @cancel="onTrackStitchedCancel"
+    />
+    <QrPosterDialog
+        v-if="canEdit"
+        v-model:visible="qrVisible"
+        :url="qrInvite?.url"
+        :event-name="event.name"
+        :label="qrInvite?.label"
     />
     <component :is="Layout">
         <template #header>
@@ -493,6 +506,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                                     <code class="invite-url">{{ invite.url }}</code>
                                 </div>
                                 <div class="invite-actions">
+                                    <Button icon="pi pi-qrcode" label="QR" size="small" severity="secondary" @click="openQr(invite)" />
                                     <Button icon="pi pi-copy" label="Copy" size="small" severity="secondary" @click="copyInvite(invite)" />
                                     <Button icon="pi pi-times" severity="danger" text rounded size="small" aria-label="Revoke link" @click="revokeInvite(invite)" />
                                 </div>
