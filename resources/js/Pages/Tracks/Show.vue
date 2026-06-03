@@ -105,6 +105,13 @@ let pollTimer = null;
 let syncWatchdog = null;
 const SYNC_THRESHOLD_SECONDS = 0.05; // 50 ms; anything beyond is audible.
 const SYNC_INTERVAL_MS = 200;
+// Beyond this a follower has stalled or jumped, not merely drifted — slewing
+// would take too long, so we snap once. Below it we correct with a gentle,
+// pitch-preserved playbackRate nudge instead of a seek (a seek re-buffers and
+// clicks on mobile, which is what made playback there sound like it couldn't
+// keep up).
+const HARD_RESYNC_SECONDS = 0.35;
+const MAX_RATE_NUDGE = 0.06; // cap the slew at ±6% so the time-stretch stays subtle
 
 const channelCount = () => props.track.channels_count ?? 0;
 
@@ -711,7 +718,16 @@ const initWaveform = async () => {
     // share an AudioContext built once by setupMixer().
     audioEls = channelMeta.map((channel) => {
         const audio = new Audio();
-        audio.preload = 'metadata';
+        // Buffer ahead instead of waiting for the play tap: on mobile, N streams
+        // racing to download the instant you hit play is what starves the
+        // followers and makes them stutter. 'auto' lets each lane fill early.
+        audio.preload = 'auto';
+        // Keep pitch constant when the drift watchdog (or the user's speed
+        // control) nudges playbackRate, so a slewing channel time-stretches
+        // rather than detuning against the others.
+        audio.preservesPitch = true;
+        if ('webkitPreservesPitch' in audio) audio.webkitPreservesPitch = true;
+        if ('mozPreservesPitch' in audio) audio.mozPreservesPitch = true;
         if (corsOk) audio.crossOrigin = props.track.stream_cross_origin;
         audio.src = channel.stream_url;
         return audio;
@@ -790,11 +806,28 @@ const bindChannelSync = () => {
 
 const driftCheck = () => {
     if (audioEls.length <= 1) return;
-    const ref = audioEls[0].currentTime;
+    const primary = audioEls[0];
+    const ref = primary.currentTime;
+    const base = primary.playbackRate || 1;
     for (let i = 1; i < audioEls.length; i++) {
         const el = audioEls[i];
-        if (Math.abs(el.currentTime - ref) > SYNC_THRESHOLD_SECONDS) {
+        if (el.paused || el.ended) continue; // stopped followers are the event handlers' job
+        const drift = el.currentTime - ref; // + = running ahead, − = lagging
+        const ad = Math.abs(drift);
+        if (ad > HARD_RESYNC_SECONDS) {
+            // A stall or jump slipped through — a nudge can't close this in time.
             try { el.currentTime = ref; } catch {}
+            if (el.playbackRate !== base) el.playbackRate = base;
+        } else if (ad > SYNC_THRESHOLD_SECONDS) {
+            // Slew back gently: ahead → slow down, behind → speed up. With
+            // preservesPitch on (set at creation) this time-stretches rather
+            // than detuning, so it's inaudible — and unlike a seek it never
+            // re-buffers. Proportional to the gap, clamped to MAX_RATE_NUDGE.
+            const k = Math.min(MAX_RATE_NUDGE, ad);
+            const rate = drift > 0 ? base * (1 - k) : base * (1 + k);
+            if (Math.abs(el.playbackRate - rate) > 0.001) el.playbackRate = rate;
+        } else if (Math.abs(el.playbackRate - base) > 0.001) {
+            el.playbackRate = base; // back in sync — restore the user's chosen speed
         }
     }
 };
