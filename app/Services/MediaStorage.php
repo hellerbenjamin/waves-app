@@ -197,6 +197,23 @@ class MediaStorage
     }
 
     /**
+     * Return a string ffmpeg can use as an -i input: a 5-minute signed URL for
+     * S3/R2 (which supports range requests, so ffmpeg only fetches what it
+     * needs), or the real filesystem path for local disks.
+     */
+    public function ffmpegInput(string $key): string
+    {
+        if ($this->isS3()) {
+            /** @var AwsS3V3Adapter $disk */
+            $disk = $this->disk();
+
+            return $disk->temporaryUrl($key, now()->addMinutes(5));
+        }
+
+        return $this->disk()->path($key);
+    }
+
+    /**
      * The URL to load a media object (or its thumbnail) from in the page. For
      * an owner's own page an S3 disk is handed a presigned object URL directly;
      * the TTL must outlast a viewing session since URLs are baked in at render

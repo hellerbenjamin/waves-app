@@ -6,11 +6,12 @@ use App\Models\Media;
 use App\Services\MediaStorage;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
+use Symfony\Component\Process\Process;
 
 /**
- * Produces a downscaled JPEG thumbnail for an uploaded image and records its
- * pixel dimensions. Videos are skipped — poster-frame extraction needs ffmpeg,
- * which the worker doesn't have yet, so the UI falls back to an inline player.
+ * Produces a downscaled JPEG thumbnail for an uploaded image or video.
+ * Images are decoded with GD; videos use ffmpeg to pull a poster frame at the
+ * 1-second mark (fast seek, so only a tiny read is needed even for huge files).
  */
 class GenerateThumbnail implements ShouldQueue
 {
@@ -25,10 +26,15 @@ class GenerateThumbnail implements ShouldQueue
 
     public function handle(MediaStorage $storage): void
     {
-        if ($this->media->kind !== 'image') {
-            return;
+        if ($this->media->kind === 'image') {
+            $this->generateImageThumb($storage);
+        } elseif ($this->media->kind === 'video') {
+            $this->generateVideoThumb($storage);
         }
+    }
 
+    private function generateImageThumb(MediaStorage $storage): void
+    {
         $bytes = $storage->get($this->media->s3_key);
         if ($bytes === null) {
             return;
@@ -63,6 +69,46 @@ class GenerateThumbnail implements ShouldQueue
             'width' => $width,
             'height' => $height,
         ]);
+    }
+
+    private function generateVideoThumb(MediaStorage $storage): void
+    {
+        $input = $storage->ffmpegInput($this->media->s3_key);
+
+        // Write to a uniquely-named temp file; ffmpeg requires the .jpg
+        // extension to infer the output format.
+        $tmp = tempnam(sys_get_temp_dir(), 'waves_vthumb_').'.jpg';
+
+        try {
+            // -ss before -i is a fast keyframe seek; ffmpeg only fetches the
+            // moov atom and a small slice around the target time even over HTTP.
+            $process = new Process([
+                'ffmpeg', '-y',
+                '-ss', '00:00:01',
+                '-i', $input,
+                '-vframes', '1',
+                '-vf', 'scale='.self::MAX_EDGE.':-2',
+                $tmp,
+            ]);
+            $process->setTimeout(60);
+            $process->run();
+
+            if (! $process->isSuccessful() || ! file_exists($tmp) || filesize($tmp) === 0) {
+                return;
+            }
+
+            $jpeg = file_get_contents($tmp);
+            if ($jpeg === false || $jpeg === '') {
+                return;
+            }
+
+            $thumbKey = $storage->thumbKeyFor($this->media->s3_key);
+            $storage->putContents($thumbKey, $jpeg);
+
+            $this->media->update(['thumb_key' => $thumbKey]);
+        } finally {
+            @unlink($tmp);
+        }
     }
 
     /**
