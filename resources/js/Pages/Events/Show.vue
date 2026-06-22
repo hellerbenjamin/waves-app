@@ -574,9 +574,9 @@ const openLightbox = (item) => { lightbox.value = item; };
         </Dialog>
 
         <!-- Image lightbox -->
-        <Dialog :visible="!!lightbox" modal dismissableMask :showHeader="false" :style="{ width: 'auto', maxWidth: '92vw' }" @update:visible="lightbox = null">
+        <Dialog :visible="!!lightbox" modal dismissableMask :showHeader="false" :style="{ width: 'auto', maxWidth: '92vw' }" :class="lightbox?.kind === 'video' ? 'lightbox-video-dialog' : ''" @update:visible="lightbox = null">
             <template v-if="lightbox">
-                <video v-if="lightbox.kind === 'video'" :src="lightbox.url" controls autoplay class="lightbox-img" />
+                <video v-if="lightbox.kind === 'video'" :src="lightbox.url" controls autoplay class="lightbox-img lightbox-video" />
                 <img v-else :src="lightbox.url" :alt="lightbox.name" class="lightbox-img" />
             </template>
         </Dialog>
@@ -622,6 +622,11 @@ const openLightbox = (item) => { lightbox.value = item; };
 .tile-download { display: inline-flex; line-height: 0; }
 .media-tile:hover .tile-actions, .media-tile:focus-within .tile-actions { opacity: 1; }
 .lightbox-img { max-width: 90vw; max-height: 85vh; display: block; }
+@media (max-width: 640px) {
+    :global(.lightbox-video-dialog) { width: 100vw !important; max-width: 100vw !important; height: 100dvh !important; margin: 0 !important; border-radius: 0 !important; }
+    :global(.lightbox-video-dialog .p-dialog-content) { padding: 0 !important; height: 100%; background: #000; display: flex; align-items: center; }
+    .lightbox-video { max-width: 100vw; max-height: 100dvh; width: 100%; height: 100%; object-fit: contain; }
+}
 .form { display: flex; flex-direction: column; gap: 1rem; }
 .field { display: flex; flex-direction: column; gap: 0.4rem; flex: 1; }
 .field label { font-size: 0.85rem; font-weight: 500; }
