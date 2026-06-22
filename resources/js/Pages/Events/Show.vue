@@ -311,6 +311,20 @@ const revokeInvite = (invite) => confirm.require({
     accept: () => router.delete(route('events.invites.destroy', [props.event.id, invite.id]), { preserveScroll: true }),
 });
 
+// --- Download all media ------------------------------------------------------
+const downloadAll = () => {
+    media.value.filter((m) => m.download_url).forEach((item, i) => {
+        setTimeout(() => {
+            const a = document.createElement('a');
+            a.href = item.download_url;
+            a.download = item.name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }, i * 300);
+    });
+};
+
 // --- Image lightbox ----------------------------------------------------------
 const lightbox = ref(null);
 const openLightbox = (item) => { lightbox.value = item; };
@@ -426,6 +440,7 @@ const openLightbox = (item) => { lightbox.value = item; };
                     <h3>Photos &amp; videos <span v-if="media.length" class="count-badge">{{ media.length }}</span></h3>
                     <!-- Hidden file picker; the visible "Upload media" button lives below. -->
                     <input v-if="canUploadMedia" ref="mediaInput" type="file" accept="image/*,video/*" multiple style="display:none" @change="onMediaSelected" />
+                    <Button v-if="!canEdit && media.length" icon="pi pi-download" label="Download all" size="small" severity="secondary" outlined @click="downloadAll" />
                 </div>
 
                 <Card v-if="canUploadMedia && uploads.length" class="uploads">
