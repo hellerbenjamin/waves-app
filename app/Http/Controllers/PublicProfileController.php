@@ -129,4 +129,12 @@ class PublicProfileController extends Controller
 
         return $this->media->downloadResponse($media);
     }
+
+    public function downloadAllMedia(User $user, Event $event): SymfonyResponse
+    {
+        abort_unless($event->user_id === $user->id, 404);
+        $event->load('media');
+
+        return $this->media->zipDownloadResponse($event, $event->name.'.zip');
+    }
 }

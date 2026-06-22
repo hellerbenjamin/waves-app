@@ -251,4 +251,19 @@ class EventController extends Controller
 
         return $this->media->downloadResponse($media);
     }
+
+    public function downloadAllSharedMedia(Event $event): SymfonyResponse
+    {
+        $event->load('media');
+
+        return $this->media->zipDownloadResponse($event, $event->name.'.zip');
+    }
+
+    public function downloadAllMedia(Request $request, Event $event): SymfonyResponse
+    {
+        $this->authorize('view', $event);
+        $event->load('media');
+
+        return $this->media->zipDownloadResponse($event, $event->name.'.zip');
+    }
 }

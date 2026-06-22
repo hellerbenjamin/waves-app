@@ -11,6 +11,8 @@ use Illuminate\Filesystem\AwsS3V3Adapter;
 use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response as SymfonyResponse;
+use Symfony\Component\HttpFoundation\StreamedResponse;
+use ZipStream\ZipStream;
 
 /**
  * Where event photos and videos live, and how they are read and written. Shares
@@ -194,6 +196,39 @@ class MediaStorage
             $filename,
             array_filter(['Content-Type' => $media->mime]),
         );
+    }
+
+    /**
+     * Stream all of an event's media files as a single ZIP download. Each file
+     * is piped from the disk directly into the ZIP entry — nothing is buffered
+     * in memory, so the response stays flat regardless of file count or size.
+     */
+    public function zipDownloadResponse(Event $event, string $zipName): StreamedResponse
+    {
+        // Eager-load so the closure doesn't hit the DB per file.
+        $media = $event->media->all();
+
+        return response()->stream(function () use ($media, $zipName) {
+            $zip = new ZipStream(outputStream: fopen('php://output', 'wb'));
+
+            foreach ($media as $item) {
+                $stream = $this->disk()->readStream($item->s3_key);
+                if (! is_resource($stream)) {
+                    continue;
+                }
+
+                $zip->addFileFromStream(
+                    fileName: $item->original_name ?? ('media-'.$item->id),
+                    stream: $stream,
+                );
+            }
+
+            $zip->finish();
+        }, 200, [
+            'Content-Type' => 'application/zip',
+            'Content-Disposition' => 'attachment; filename="'.addslashes($zipName).'"',
+            'X-Accel-Buffering' => 'no',
+        ]);
     }
 
     /**

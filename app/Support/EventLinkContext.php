@@ -34,6 +34,7 @@ class EventLinkContext
         public readonly Closure $mediaDownload,
         public readonly ?string $eventShareUrl,
         public readonly ?array $mediaUploadRoutes = null,
+        public readonly ?string $mediaDownloadAllUrl = null,
     ) {}
 
     /** Owner-facing: cookie-auth in-app routes, presigned S3, all sections visible. */
@@ -46,6 +47,7 @@ class EventLinkContext
             mediaThumb: fn (Media $m) => route('media.thumb', $m->id),
             mediaDownload: fn (Media $m) => route('media.download', $m->id),
             eventShareUrl: $event->share_token ? route('events.shared', $event->share_token) : null,
+            mediaDownloadAllUrl: route('events.media.download-all', $event->id),
             mediaUploadRoutes: [
                 'uploadUrl' => route('media.upload-url'),
                 'multipartCreate' => route('media.multipart.create'),
@@ -70,6 +72,7 @@ class EventLinkContext
             mediaThumb: fn (Media $m) => route('events.shared.media-thumb', [$t, $m->id]),
             mediaDownload: fn (Media $m) => route('events.shared.media-download', [$t, $m->id]),
             eventShareUrl: route('events.shared', $t),
+            mediaDownloadAllUrl: route('events.shared.media.download-all', $t),
             // Public share viewers can upload photos/videos through the same
             // token — view and contribute live on one link.
             mediaUploadRoutes: [
@@ -97,6 +100,7 @@ class EventLinkContext
             mediaThumb: fn (Media $m) => route('profile.shared.media-thumb', [$userToken, $event->id, $m->id]),
             mediaDownload: fn (Media $m) => route('profile.shared.media-download', [$userToken, $event->id, $m->id]),
             eventShareUrl: null,
+            mediaDownloadAllUrl: route('profile.shared.media.download-all', [$userToken, $event->id]),
         );
     }
 }
