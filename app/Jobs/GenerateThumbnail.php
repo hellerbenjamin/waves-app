@@ -80,17 +80,27 @@ class GenerateThumbnail implements ShouldQueue
         $tmp = tempnam(sys_get_temp_dir(), 'waves_vthumb_').'.jpg';
 
         try {
-            // -ss before -i is a fast keyframe seek; ffmpeg only fetches the
-            // moov atom and a small slice around the target time even over HTTP.
+            // -ss before -i is a fast keyframe seek. For faststart MP4s ffmpeg
+            // only fetches the moov atom and a small slice around the target
+            // time, but phone recordings often park the moov at the end of the
+            // file, so reaching it means a tail seek over HTTP. The reconnect /
+            // rw_timeout flags keep a stalled or dropped R2 read from hanging
+            // until the wall-clock timeout, reconnecting with a fresh range
+            // request instead.
             $process = new Process([
-                'ffmpeg', '-y',
+                'ffmpeg', '-y', '-nostdin',
+                '-rw_timeout', '15000000', // 15s socket read/write timeout (µs)
+                '-reconnect', '1',
+                '-reconnect_streamed', '1',
+                '-reconnect_on_network_error', '1',
+                '-reconnect_delay_max', '2',
                 '-ss', '00:00:01',
                 '-i', $input,
                 '-vframes', '1',
                 '-vf', 'scale='.self::MAX_EDGE.':-2',
                 $tmp,
             ]);
-            $process->setTimeout(60);
+            $process->setTimeout(120);
             $process->run();
 
             if (! $process->isSuccessful() || ! file_exists($tmp) || filesize($tmp) === 0) {

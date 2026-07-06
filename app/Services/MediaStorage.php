@@ -232,9 +232,11 @@ class MediaStorage
     }
 
     /**
-     * Return a string ffmpeg can use as an -i input: a 5-minute signed URL for
-     * S3/R2 (which supports range requests, so ffmpeg only fetches what it
-     * needs), or the real filesystem path for local disks.
+     * Return a string ffmpeg can use as an -i input: a signed URL for S3/R2
+     * (which supports range requests, so ffmpeg only fetches what it needs), or
+     * the real filesystem path for local disks. The TTL must outlast the whole
+     * ffmpeg run, including any reconnects on a slow read, not just the initial
+     * request.
      */
     public function ffmpegInput(string $key): string
     {
@@ -242,7 +244,7 @@ class MediaStorage
             /** @var AwsS3V3Adapter $disk */
             $disk = $this->disk();
 
-            return $disk->temporaryUrl($key, now()->addMinutes(5));
+            return $disk->temporaryUrl($key, now()->addMinutes(20));
         }
 
         return $this->disk()->path($key);
