@@ -8,7 +8,9 @@ use Illuminate\Console\Command;
 
 class TranscodeVideos extends Command
 {
-    protected $signature = 'media:transcode-videos {--force : Re-transcode even if a rendition already exists}';
+    protected $signature = 'media:transcode-videos
+        {--force : Re-transcode even if a rendition already exists}
+        {--reset-rotation : Clear the stored rotation first so the assume-portrait heuristic decides afresh (discards manual rotate corrections)}';
 
     protected $description = 'Queue web-rendition transcoding for uploaded videos';
 
@@ -26,6 +28,11 @@ class TranscodeVideos extends Command
             $this->info('No videos to process.');
 
             return;
+        }
+
+        if ($this->option('reset-rotation')) {
+            (clone $query)->update(['rotation' => null]);
+            $this->info('Cleared stored rotation; the heuristic will re-decide.');
         }
 
         $this->info("Queueing transcodes for {$count} video(s)…");

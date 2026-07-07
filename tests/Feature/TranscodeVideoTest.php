@@ -118,8 +118,9 @@ class TranscodeVideoTest extends TestCase
 
         $media->refresh();
 
-        // Assumed portrait: rotated 90° and stored, rendition comes out portrait.
-        $this->assertSame(90, $media->rotation);
+        // Assumed portrait: rotated 90° counter-clockwise (270° CW) and stored,
+        // rendition comes out portrait.
+        $this->assertSame(270, $media->rotation);
         $this->assertLessThan($media->height, $media->width, 'rendition should be portrait');
     }
 

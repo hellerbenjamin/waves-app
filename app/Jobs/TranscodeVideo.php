@@ -24,8 +24,9 @@ use Symfony\Component\Process\Process;
  * Orientation: phones tag a rotation matrix that ffmpeg's autorotate applies.
  * Dedicated cameras held sideways write no such tag, leaving portrait footage
  * baked into a landscape frame. For that metadata-less landscape case we assume
- * portrait and rotate 90° clockwise; the applied angle is stored on `rotation`,
- * which the owner can override (then re-transcode) when the guess is wrong.
+ * portrait and rotate 90° counter-clockwise (the direction most such footage
+ * needs); the applied angle is stored on `rotation`, which the owner can
+ * override (then re-transcode) when the guess is wrong.
  */
 class TranscodeVideo implements ShouldQueue
 {
@@ -115,7 +116,9 @@ class TranscodeVideo implements ShouldQueue
         $hasMetadata = array_key_exists('rotation', $source);
         $landscape = ($source['width'] ?? 0) > ($source['height'] ?? 0);
 
-        return (! $hasMetadata && $landscape) ? 90 : 0;
+        // 270° clockwise == 90° counter-clockwise, the direction most
+        // sideways-held camera footage needs.
+        return (! $hasMetadata && $landscape) ? 270 : 0;
     }
 
     /** Encode the local source into a downscaled, faststart web MP4. */
