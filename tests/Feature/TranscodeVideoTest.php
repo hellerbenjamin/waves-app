@@ -35,6 +35,7 @@ class TranscodeVideoTest extends TestCase
             'width' => null,
             'height' => null,
             'duration' => null,
+            'rotation' => 0, // pin: the sample is metadata-less landscape, which would otherwise auto-rotate
         ]);
 
         (new TranscodeVideo($media))->handle(app(MediaStorage::class));
@@ -91,6 +92,62 @@ class TranscodeVideoTest extends TestCase
         $this->assertNotNull($media->width);
         $this->assertNotNull($media->height);
         $this->assertLessThan($media->height, $media->width, 'rendition should be portrait');
+    }
+
+    public function test_it_assumes_portrait_for_a_metadataless_landscape_video(): void
+    {
+        if (! (new ExecutableFinder)->find('ffmpeg')) {
+            $this->markTestSkipped('ffmpeg is not available.');
+        }
+
+        Storage::fake('s3');
+
+        $user = User::factory()->create();
+        $key = "media/users/{$user->id}/canon.mp4";
+        // sampleVideo() is a plain 640x480 landscape clip with no rotation
+        // metadata — a camera held sideways.
+        Storage::disk('s3')->put($key, $this->sampleVideo());
+
+        $media = Media::factory()->for($user)->video()->create([
+            's3_key' => $key,
+            'playback_key' => null,
+            'rotation' => null, // undecided → heuristic runs
+        ]);
+
+        (new TranscodeVideo($media))->handle(app(MediaStorage::class));
+
+        $media->refresh();
+
+        // Assumed portrait: rotated 90° and stored, rendition comes out portrait.
+        $this->assertSame(90, $media->rotation);
+        $this->assertLessThan($media->height, $media->width, 'rendition should be portrait');
+    }
+
+    public function test_an_explicit_rotation_override_beats_the_heuristic(): void
+    {
+        if (! (new ExecutableFinder)->find('ffmpeg')) {
+            $this->markTestSkipped('ffmpeg is not available.');
+        }
+
+        Storage::fake('s3');
+
+        $user = User::factory()->create();
+        $key = "media/users/{$user->id}/reallylandscape.mp4";
+        Storage::disk('s3')->put($key, $this->sampleVideo());
+
+        // Owner corrected the guess: this one really is landscape.
+        $media = Media::factory()->for($user)->video()->create([
+            's3_key' => $key,
+            'playback_key' => null,
+            'rotation' => 0,
+        ]);
+
+        (new TranscodeVideo($media))->handle(app(MediaStorage::class));
+
+        $media->refresh();
+
+        $this->assertSame(0, $media->rotation);
+        $this->assertGreaterThan($media->height, $media->width, 'rendition should stay landscape');
     }
 
     public function test_it_ignores_non_videos(): void

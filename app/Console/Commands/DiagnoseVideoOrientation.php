@@ -38,15 +38,42 @@ class DiagnoseVideoOrientation extends Command
 
     private function probe(string $label, string $input): void
     {
+        // Full stream dump so the Display Matrix side-data (where phones store
+        // orientation) is always included, plus any legacy rotate tag.
         $p = new Process([
             'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,coded_width,coded_height,side_data_list:stream_tags=rotate',
-            '-of', 'json', $input,
+            '-show_streams', '-of', 'json', $input,
         ]);
         $p->setTimeout(60);
         $p->run();
 
         $out = $p->getOutput() ?: $p->getErrorOutput();
-        $this->line("  {$label}: ".trim(preg_replace('/\s+/', ' ', $out)));
+
+        // Pull out just the fields that matter for orientation.
+        $data = json_decode($out, true);
+        $stream = $data['streams'][0] ?? [];
+        $rotation = null;
+        $matrix = false;
+        foreach ($stream['side_data_list'] ?? [] as $sd) {
+            if (isset($sd['rotation'])) {
+                $rotation = $sd['rotation'];
+            }
+            if (($sd['side_data_type'] ?? '') === 'Display Matrix') {
+                $matrix = true;
+            }
+        }
+
+        $summary = sprintf(
+            'coded=%sx%s  displayW/H=%sx%s  DisplayMatrix=%s  rotation=%s  rotateTag=%s',
+            $stream['coded_width'] ?? '?',
+            $stream['coded_height'] ?? '?',
+            $stream['width'] ?? '?',
+            $stream['height'] ?? '?',
+            $matrix ? 'yes' : 'no',
+            $rotation ?? 'none',
+            $stream['tags']['rotate'] ?? 'none',
+        );
+
+        $this->line("  {$label}: {$summary}");
     }
 }

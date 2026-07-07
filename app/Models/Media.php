@@ -43,6 +43,7 @@ class Media extends Model
         'width',
         'height',
         'duration',
+        'rotation',
         'thumb_key',
         'share_token',
     ];
@@ -52,6 +53,7 @@ class Media extends Model
         'width' => 'integer',
         'height' => 'integer',
         'duration' => 'integer',
+        'rotation' => 'integer',
     ];
 
     public function user(): BelongsTo
