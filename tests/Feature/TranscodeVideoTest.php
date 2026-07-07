@@ -49,14 +49,48 @@ class TranscodeVideoTest extends TestCase
         $this->assertNotNull($media->thumb_key);
         Storage::disk('s3')->assertExists($media->thumb_key);
 
-        // ffprobe metadata captured. Source is 640x480, ~2s.
-        $this->assertSame(640, $media->width);
-        $this->assertSame(480, $media->height);
+        // Metadata is read from the rendition: the 640x480 (4:3) source is
+        // downscaled into the 720p box as 960x720, and duration is ~2s.
+        $this->assertSame(960, $media->width);
+        $this->assertSame(720, $media->height);
         $this->assertGreaterThanOrEqual(1, $media->duration);
 
         // playbackKey() now resolves to the rendition, not the original.
         $this->assertSame($media->playback_key, $media->playbackKey());
         $this->assertSame('video/mp4', $media->playbackMime());
+    }
+
+    public function test_it_uprights_a_sideways_video(): void
+    {
+        if (! (new ExecutableFinder)->find('ffmpeg')) {
+            $this->markTestSkipped('ffmpeg is not available.');
+        }
+
+        Storage::fake('s3');
+
+        $user = User::factory()->create();
+        $key = "media/users/{$user->id}/portrait.mp4";
+        // A 640x480 landscape frame carrying a 90deg rotation matrix — i.e. a
+        // portrait clip shot on a sideways-held phone. Naively storing the coded
+        // dimensions would record it as landscape.
+        Storage::disk('s3')->put($key, $this->rotatedVideo());
+
+        $media = Media::factory()->for($user)->video()->create([
+            's3_key' => $key,
+            'playback_key' => null,
+            'width' => null,
+            'height' => null,
+        ]);
+
+        (new TranscodeVideo($media))->handle(app(MediaStorage::class));
+
+        $media->refresh();
+
+        // Autorotate baked the orientation into the rendition, so the recorded
+        // dimensions come out portrait, not the source's coded 640x480.
+        $this->assertNotNull($media->width);
+        $this->assertNotNull($media->height);
+        $this->assertLessThan($media->height, $media->width, 'rendition should be portrait');
     }
 
     public function test_it_ignores_non_videos(): void
@@ -87,6 +121,34 @@ class TranscodeVideoTest extends TestCase
 
         $bytes = (string) file_get_contents($tmp);
         @unlink($tmp);
+
+        return $bytes;
+    }
+
+    /** A landscape-coded H.264 sample carrying a 90deg display-rotation matrix. */
+    private function rotatedVideo(): string
+    {
+        $plain = tempnam(sys_get_temp_dir(), 'waves_test_plain_').'.mp4';
+        $rotated = tempnam(sys_get_temp_dir(), 'waves_test_rot_').'.mp4';
+
+        (new Process([
+            'ffmpeg', '-y', '-nostdin',
+            '-f', 'lavfi', '-i', 'testsrc=duration=2:size=640x480:rate=15',
+            '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+            $plain,
+        ]))->setTimeout(60)->run();
+
+        // -display_rotation is an input option; stream-copying stamps the matrix
+        // onto the output without re-encoding.
+        (new Process([
+            'ffmpeg', '-y', '-nostdin',
+            '-display_rotation', '90', '-i', $plain,
+            '-c', 'copy', $rotated,
+        ]))->setTimeout(60)->run();
+
+        $bytes = (string) file_get_contents($rotated);
+        @unlink($plain);
+        @unlink($rotated);
 
         return $bytes;
     }

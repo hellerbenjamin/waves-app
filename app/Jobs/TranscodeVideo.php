@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Models\Media;
 use App\Services\MediaStorage;
+use App\Support\VideoProbe;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Symfony\Component\Process\Process;
@@ -51,11 +52,15 @@ class TranscodeVideo implements ShouldQueue
         $poster = tempnam(sys_get_temp_dir(), 'waves_vthumb_').'.jpg';
 
         try {
-            $meta = $this->probe($source);
-
             if (! $this->encode($source, $rendition)) {
                 return; // Leave playback_key null; serving falls back to the original.
             }
+
+            // Probe the rendition, not the source: ffmpeg's default autorotate
+            // has already baked in any phone-orientation matrix, so the
+            // rendition's coded dimensions are the true display dimensions — a
+            // portrait clip shot on a sideways-held phone lands as portrait here.
+            $meta = VideoProbe::dimensions($rendition);
 
             $playbackKey = $storage->playbackKeyFor($this->media->s3_key);
             $handle = fopen($rendition, 'rb');
@@ -83,48 +88,6 @@ class TranscodeVideo implements ShouldQueue
             @unlink($rendition);
             @unlink($poster);
         }
-    }
-
-    /**
-     * Read the source's dimensions and duration with ffprobe.
-     *
-     * @return array{width?: int, height?: int, duration?: int}
-     */
-    private function probe(string $path): array
-    {
-        $process = new Process([
-            'ffprobe', '-v', 'quiet',
-            '-print_format', 'json',
-            '-show_format', '-show_streams',
-            $path,
-        ]);
-        $process->setTimeout(60);
-        $process->run();
-
-        if (! $process->isSuccessful()) {
-            return [];
-        }
-
-        $data = json_decode($process->getOutput(), true);
-        if (! is_array($data)) {
-            return [];
-        }
-
-        $video = null;
-        foreach ($data['streams'] ?? [] as $stream) {
-            if (($stream['codec_type'] ?? null) === 'video') {
-                $video = $stream;
-                break;
-            }
-        }
-
-        return array_filter([
-            'width' => isset($video['width']) ? (int) $video['width'] : null,
-            'height' => isset($video['height']) ? (int) $video['height'] : null,
-            'duration' => isset($data['format']['duration'])
-                ? (int) round((float) $data['format']['duration'])
-                : null,
-        ], fn ($v) => $v !== null);
     }
 
     /** Encode the local source into a downscaled, faststart web MP4. */
