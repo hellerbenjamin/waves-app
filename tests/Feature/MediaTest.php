@@ -254,6 +254,55 @@ class MediaTest extends TestCase
         $this->assertDatabaseHas('media', ['id' => $media->id]);
     }
 
+    public function test_rotate_advances_rotation_and_requeues_transcode(): void
+    {
+        Bus::fake();
+
+        $user = User::factory()->create();
+        $media = Media::factory()->for($user)->video()->create(['rotation' => 90]);
+
+        $this->actingAs($user)
+            ->post("/media/{$media->id}/rotate", ['direction' => 'cw'])
+            ->assertRedirect();
+
+        $this->assertSame(180, $media->fresh()->rotation);
+        Bus::assertDispatched(TranscodeVideo::class);
+    }
+
+    public function test_rotate_ccw_wraps_below_zero(): void
+    {
+        Bus::fake();
+
+        $user = User::factory()->create();
+        $media = Media::factory()->for($user)->video()->create(['rotation' => 0]);
+
+        $this->actingAs($user)
+            ->post("/media/{$media->id}/rotate", ['direction' => 'ccw'])
+            ->assertRedirect();
+
+        $this->assertSame(270, $media->fresh()->rotation);
+    }
+
+    public function test_rotate_422s_for_images(): void
+    {
+        $user = User::factory()->create();
+        $media = Media::factory()->for($user)->create(['kind' => 'image']);
+
+        $this->actingAs($user)
+            ->post("/media/{$media->id}/rotate", ['direction' => 'cw'])
+            ->assertStatus(422);
+    }
+
+    public function test_rotate_403s_for_other_users_media(): void
+    {
+        $user = User::factory()->create();
+        $media = Media::factory()->for(User::factory())->video()->create();
+
+        $this->actingAs($user)
+            ->post("/media/{$media->id}/rotate", ['direction' => 'cw'])
+            ->assertForbidden();
+    }
+
     public function test_cleanup_deletes_an_orphaned_object(): void
     {
         $user = User::factory()->create();

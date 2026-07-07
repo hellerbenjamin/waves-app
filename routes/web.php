@@ -145,6 +145,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/media/{media}/download', [MediaController::class, 'download'])->name('media.download');
     Route::get('/events/{event}/media/download-all', [EventController::class, 'downloadAllMedia'])->name('events.media.download-all');
     Route::delete('/media/{media}', [MediaController::class, 'destroy'])->name('media.destroy');
+    Route::post('/media/{media}/rotate', [MediaController::class, 'rotate'])->name('media.rotate');
     Route::post('/media/{media}/share', [MediaController::class, 'share'])->name('media.share');
     Route::delete('/media/{media}/share', [MediaController::class, 'unshare'])->name('media.unshare');
 });

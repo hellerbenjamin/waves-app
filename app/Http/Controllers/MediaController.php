@@ -104,6 +104,22 @@ class MediaController extends Controller
         return $this->storage->downloadResponse($media);
     }
 
+    public function rotate(Request $request, Media $media): RedirectResponse
+    {
+        $this->authorize('update', $media);
+        abort_unless($media->kind === 'video', 422, 'Only videos can be rotated.');
+
+        $direction = $request->validate(['direction' => ['required', 'in:cw,ccw']])['direction'];
+
+        // Turn the currently-displayed orientation a quarter-turn and re-encode.
+        $delta = $direction === 'ccw' ? 270 : 90;
+        $media->update(['rotation' => (($media->rotation ?? 0) + $delta) % 360]);
+
+        TranscodeVideo::dispatch($media);
+
+        return back();
+    }
+
     public function destroy(Media $media): RedirectResponse
     {
         $this->authorize('delete', $media);

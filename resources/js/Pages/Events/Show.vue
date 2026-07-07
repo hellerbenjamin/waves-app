@@ -315,7 +315,37 @@ const revokeInvite = (invite) => confirm.require({
 
 // --- Image lightbox ----------------------------------------------------------
 const lightbox = ref(null);
-const openLightbox = (item) => { lightbox.value = item; };
+// Optimistic preview rotation (degrees) layered on the currently-shown
+// rendition while the re-transcode runs in the background; resets each open.
+const previewRotation = ref(0);
+const openLightbox = (item) => { lightbox.value = item; previewRotation.value = 0; };
+
+// Keep a rotated video fitting the viewport by swapping the width/height caps
+// on the quarter-turns.
+const lightboxVideoStyle = computed(() => {
+    const deg = ((previewRotation.value % 360) + 360) % 360;
+    const swapped = deg === 90 || deg === 270;
+    return {
+        transform: `rotate(${deg}deg)`,
+        maxWidth: swapped ? '85vh' : '90vw',
+        maxHeight: swapped ? '90vw' : '85vh',
+    };
+});
+
+const rotateVideo = (direction) => {
+    if (!lightbox.value) return;
+    previewRotation.value += direction === 'cw' ? 90 : -90;
+    router.post(route('media.rotate', lightbox.value.id), { direction }, {
+        preserveScroll: true,
+        preserveState: true,
+        onSuccess: () => toast.add({
+            severity: 'info',
+            summary: 'Rotating video',
+            detail: 'The saved video will finish updating a moment after processing.',
+            life: 4000,
+        }),
+    });
+};
 </script>
 
 <template>
@@ -566,7 +596,11 @@ const openLightbox = (item) => { lightbox.value = item; };
         <!-- Image lightbox -->
         <Dialog :visible="!!lightbox" modal dismissableMask :showHeader="false" :style="{ width: 'auto', maxWidth: '92vw' }" :class="lightbox?.kind === 'video' ? 'lightbox-video-dialog' : ''" @update:visible="lightbox = null">
             <template v-if="lightbox">
-                <video v-if="lightbox.kind === 'video'" :src="lightbox.url" controls autoplay class="lightbox-img lightbox-video" />
+                <div v-if="canEdit && lightbox.kind === 'video'" class="rotate-toolbar">
+                    <Button icon="pi pi-replay" text rounded severity="secondary" aria-label="Rotate left" @click="rotateVideo('ccw')" />
+                    <Button icon="pi pi-refresh" text rounded severity="secondary" aria-label="Rotate right" @click="rotateVideo('cw')" />
+                </div>
+                <video v-if="lightbox.kind === 'video'" :src="lightbox.url" :style="lightboxVideoStyle" controls autoplay class="lightbox-img lightbox-video" />
                 <img v-else :src="lightbox.url" :alt="lightbox.name" class="lightbox-img" />
             </template>
         </Dialog>
@@ -612,6 +646,10 @@ const openLightbox = (item) => { lightbox.value = item; };
 .tile-download { display: inline-flex; line-height: 0; }
 .media-tile:hover .tile-actions, .media-tile:focus-within .tile-actions { opacity: 1; }
 .lightbox-img { max-width: 90vw; max-height: 85vh; display: block; }
+.lightbox-video { transition: transform 0.2s ease; }
+.rotate-toolbar { position: absolute; top: 0.75rem; left: 0.75rem; z-index: 10; display: flex; gap: 0.25rem; background: rgba(0, 0, 0, 0.45); border-radius: 999px; padding: 0.15rem; }
+.rotate-toolbar :deep(.p-button) { color: #fff; }
+:global(.lightbox-video-dialog .p-dialog-content) { position: relative; }
 @media (max-width: 640px) {
     :global(.lightbox-video-dialog) { width: 100vw !important; max-width: 100vw !important; height: 100dvh !important; margin: 0 !important; border-radius: 0 !important; }
     :global(.lightbox-video-dialog .p-dialog-content) { padding: 0 !important; height: 100%; background: #000; display: flex; align-items: center; }
