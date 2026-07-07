@@ -113,7 +113,7 @@ class PublicProfileController extends Controller
     {
         abort_unless($event->user_id === $user->id && $media->event_id === $event->id, 404);
 
-        return $this->media->streamResponse($media->s3_key, $media->mime);
+        return $this->media->streamResponse($media->playbackKey(), $media->playbackMime());
     }
 
     public function thumbMedia(User $user, Event $event, Media $media): SymfonyResponse

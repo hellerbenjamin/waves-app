@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Controllers\Concerns\SignsDirectUploads;
 use App\Jobs\GenerateThumbnail;
+use App\Jobs\TranscodeVideo;
 use App\Models\Event;
 use App\Models\Media;
 use App\Services\MediaStorage;
@@ -66,6 +67,8 @@ class EventShareUploadController extends Controller
 
         if ($media->kind === 'image') {
             GenerateThumbnail::dispatch($media);
+        } elseif ($media->kind === 'video') {
+            TranscodeVideo::dispatch($media);
         }
 
         return back();

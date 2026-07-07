@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\GenerateThumbnail;
+use App\Jobs\TranscodeVideo;
 use App\Models\Event;
 use App\Models\Media;
 use App\Models\User;
@@ -121,7 +122,7 @@ class MediaTest extends TestCase
         Bus::assertDispatched(GenerateThumbnail::class);
     }
 
-    public function test_store_does_not_dispatch_thumbnail_for_video(): void
+    public function test_store_transcodes_video_instead_of_thumbnailing(): void
     {
         $user = User::factory()->create();
         Storage::fake('s3');
@@ -140,6 +141,7 @@ class MediaTest extends TestCase
             ->assertRedirect();
 
         $this->assertDatabaseHas('media', ['s3_key' => $key, 'kind' => 'video']);
+        Bus::assertDispatched(TranscodeVideo::class);
         Bus::assertNotDispatched(GenerateThumbnail::class);
     }
 

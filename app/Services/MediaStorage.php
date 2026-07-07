@@ -143,6 +143,39 @@ class MediaStorage
         return "{$dir}/thumbs/{$base}.jpg";
     }
 
+    /** The web-rendition key that sits beside a video (always a faststart MP4). */
+    public function playbackKeyFor(string $sourceKey): string
+    {
+        $dir = dirname($sourceKey);
+        $base = pathinfo($sourceKey, PATHINFO_FILENAME);
+
+        return "{$dir}/web/{$base}.mp4";
+    }
+
+    /**
+     * Copy a stored object down to a local temp file and return its path. The
+     * caller owns the file and must unlink it. Used by the transcode job, which
+     * reads the whole original and wants a fast, seekable local source rather
+     * than a long-lived remote read held open for the entire encode.
+     */
+    public function downloadToTemp(string $key): string
+    {
+        $tmp = tempnam(sys_get_temp_dir(), 'waves_src_');
+
+        $source = $this->disk()->readStream($key);
+        if (! is_resource($source)) {
+            @unlink($tmp);
+            throw new \RuntimeException("Unable to read media object: {$key}");
+        }
+
+        $dest = fopen($tmp, 'wb');
+        stream_copy_to_stream($source, $dest);
+        fclose($source);
+        fclose($dest);
+
+        return $tmp;
+    }
+
     /**
      * Stream a media object for inline display. S3 redirects to a short-lived
      * signed URL (R2 honours range requests for video scrubbing); local disks
@@ -208,7 +241,7 @@ class MediaStorage
         // Eager-load so the closure doesn't hit the DB per file.
         $media = $event->media->all();
 
-        return response()->stream(function () use ($media, $zipName) {
+        return response()->stream(function () use ($media) {
             $zip = new ZipStream(outputStream: fopen('php://output', 'wb'));
 
             foreach ($media as $item) {

@@ -35,12 +35,14 @@ class Media extends Model
         'event_invite_id',
         'contributor_name',
         's3_key',
+        'playback_key',
         'original_name',
         'mime',
         'size',
         'kind',
         'width',
         'height',
+        'duration',
         'thumb_key',
         'share_token',
     ];
@@ -49,6 +51,7 @@ class Media extends Model
         'size' => 'integer',
         'width' => 'integer',
         'height' => 'integer',
+        'duration' => 'integer',
     ];
 
     public function user(): BelongsTo
@@ -65,6 +68,18 @@ class Media extends Model
     public function invite(): BelongsTo
     {
         return $this->belongsTo(EventInvite::class, 'event_invite_id');
+    }
+
+    /** The storage key to stream for playback: the web rendition when ready, else the original. */
+    public function playbackKey(): string
+    {
+        return $this->playback_key ?? $this->s3_key;
+    }
+
+    /** The MIME type served for playback — always mp4 once a rendition exists. */
+    public function playbackMime(): ?string
+    {
+        return $this->playback_key ? 'video/mp4' : $this->mime;
     }
 
     /** Classify an upload as 'image' or 'video' from its MIME type. */

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Concerns\SignsDirectUploads;
 use App\Http\Requests\StoreContributionRequest;
 use App\Jobs\GenerateThumbnail;
+use App\Jobs\TranscodeVideo;
 use App\Models\EventInvite;
 use App\Models\Media;
 use App\Services\MediaStorage;
@@ -91,6 +92,8 @@ class ContributionController extends Controller
 
         if ($media->kind === 'image') {
             GenerateThumbnail::dispatch($media);
+        } elseif ($media->kind === 'video') {
+            TranscodeVideo::dispatch($media);
         }
 
         return back();

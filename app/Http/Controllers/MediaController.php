@@ -6,6 +6,7 @@ use App\Http\Controllers\Concerns\SignsDirectUploads;
 use App\Http\Requests\MediaUploadUrlRequest;
 use App\Http\Requests\StoreMediaRequest;
 use App\Jobs\GenerateThumbnail;
+use App\Jobs\TranscodeVideo;
 use App\Models\Media;
 use App\Services\MediaStorage;
 use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
@@ -74,6 +75,8 @@ class MediaController extends Controller
 
         if ($media->kind === 'image') {
             GenerateThumbnail::dispatch($media);
+        } elseif ($media->kind === 'video') {
+            TranscodeVideo::dispatch($media);
         }
 
         return back();
@@ -83,7 +86,7 @@ class MediaController extends Controller
     {
         $this->authorize('view', $media);
 
-        return $this->storage->streamResponse($media->s3_key, $media->mime);
+        return $this->storage->streamResponse($media->playbackKey(), $media->playbackMime());
     }
 
     public function thumb(Media $media): SymfonyResponse
@@ -106,6 +109,9 @@ class MediaController extends Controller
         $this->authorize('delete', $media);
 
         $this->storage->delete($media->s3_key);
+        if ($media->playback_key) {
+            $this->storage->delete($media->playback_key);
+        }
         if ($media->thumb_key) {
             $this->storage->delete($media->thumb_key);
         }
@@ -143,13 +149,13 @@ class MediaController extends Controller
                 'mime' => $media->mime,
                 'width' => $media->width,
                 'height' => $media->height,
-                'url' => $this->storage->objectUrl($media->s3_key, route('media.shared-stream', $media->share_token), shared: true),
+                'url' => $this->storage->objectUrl($media->playbackKey(), route('media.shared-stream', $media->share_token), shared: true),
             ],
         ]);
     }
 
     public function streamShared(Media $media): SymfonyResponse
     {
-        return $this->storage->streamResponse($media->s3_key, $media->mime);
+        return $this->storage->streamResponse($media->playbackKey(), $media->playbackMime());
     }
 }
