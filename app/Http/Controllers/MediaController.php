@@ -67,6 +67,7 @@ class MediaController extends Controller
         $media = $request->user()->media()->create([
             's3_key' => $key,
             'event_id' => $request->validated('event_id'),
+            'collection_id' => $request->validated('collection_id'),
             'original_name' => $request->validated('original_name'),
             'mime' => $mime,
             'size' => $request->validated('size'),

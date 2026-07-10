@@ -256,7 +256,7 @@ class EventController extends Controller
     {
         $event->load('media');
 
-        return $this->media->zipDownloadResponse($event, $event->name.'.zip');
+        return $this->media->zipDownloadResponse($event->media, $event->name.'.zip');
     }
 
     public function downloadAllMedia(Request $request, Event $event): SymfonyResponse
@@ -264,6 +264,6 @@ class EventController extends Controller
         $this->authorize('view', $event);
         $event->load('media');
 
-        return $this->media->zipDownloadResponse($event, $event->name.'.zip');
+        return $this->media->zipDownloadResponse($event->media, $event->name.'.zip');
     }
 }

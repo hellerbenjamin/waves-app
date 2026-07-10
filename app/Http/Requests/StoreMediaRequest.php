@@ -22,6 +22,8 @@ class StoreMediaRequest extends FormRequest
             'size' => ['required', 'integer', 'min:1'],
             // Optional: drop the upload straight into an event the user owns.
             'event_id' => ['nullable', 'integer', Rule::exists('events', 'id')->where('user_id', $this->user()->id)],
+            // Optional: drop the upload straight into a collection the user owns.
+            'collection_id' => ['nullable', 'integer', Rule::exists('collections', 'id')->where('user_id', $this->user()->id)],
         ];
     }
 }
