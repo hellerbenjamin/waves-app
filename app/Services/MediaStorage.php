@@ -232,15 +232,15 @@ class MediaStorage
     }
 
     /**
-     * Stream all of an event's media files as a single ZIP download. Each file
-     * is piped from the disk directly into the ZIP entry — nothing is buffered
-     * in memory, so the response stays flat regardless of file count or size.
+     * Stream a set of media files as a single ZIP download. Each file is piped
+     * from the disk directly into the ZIP entry — nothing is buffered in memory,
+     * so the response stays flat regardless of file count or size. Callers pass
+     * an already-loaded media collection (an event's or a collection's).
+     *
+     * @param  iterable<Media>  $media
      */
-    public function zipDownloadResponse(Event $event, string $zipName): StreamedResponse
+    public function zipDownloadResponse(iterable $media, string $zipName): StreamedResponse
     {
-        // Eager-load so the closure doesn't hit the DB per file.
-        $media = $event->media->all();
-
         return response()->stream(function () use ($media) {
             $zip = new ZipStream(outputStream: fopen('php://output', 'wb'));
 

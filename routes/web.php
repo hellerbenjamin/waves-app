@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\ChannelTemplateController;
+use App\Http\Controllers\CollectionController;
 use App\Http\Controllers\ContributionController;
 use App\Http\Controllers\EventController;
 use App\Http\Controllers\EventShareUploadController;
@@ -51,6 +52,14 @@ Route::get('/u/{user:share_token}/events/{event}/media/{media}/stream', [PublicP
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/thumb', [PublicProfileController::class, 'thumbMedia'])->name('profile.shared.media-thumb');
 Route::get('/u/{user:share_token}/events/{event}/media/{media}/download', [PublicProfileController::class, 'downloadMedia'])->name('profile.shared.media-download');
 Route::get('/u/{user:share_token}/events/{event}/media/download-all', [PublicProfileController::class, 'downloadAllMedia'])->name('profile.shared.media.download-all');
+
+// A shared collection reaches its own photos and videos through the collection
+// token, so individual items don't each need a share link.
+Route::get('/collections/share/{collection:share_token}', [CollectionController::class, 'showShared'])->name('collections.shared');
+Route::get('/collections/share/{collection:share_token}/media/{media}/stream', [CollectionController::class, 'streamSharedMedia'])->name('collections.shared.media-stream');
+Route::get('/collections/share/{collection:share_token}/media/{media}/thumb', [CollectionController::class, 'thumbSharedMedia'])->name('collections.shared.media-thumb');
+Route::get('/collections/share/{collection:share_token}/media/{media}/download', [CollectionController::class, 'downloadSharedMedia'])->name('collections.shared.media-download');
+Route::get('/collections/share/{collection:share_token}/media/download-all', [CollectionController::class, 'downloadAllSharedMedia'])->name('collections.shared.media.download-all');
 
 // Per-item media share links.
 Route::get('/media/share/{media:share_token}', [MediaController::class, 'showShared'])->name('media.shared');
@@ -129,6 +138,20 @@ Route::middleware('auth')->group(function () {
     // public {invite}) so it binds by id, sidestepping the by-token binder.
     Route::post('/events/{event}/invites', [EventController::class, 'storeInvite'])->name('events.invites.store');
     Route::delete('/events/{event}/invites/{eventInvite}', [EventController::class, 'destroyInvite'])->name('events.invites.destroy');
+
+    // Collections — shareable folders of photos and videos, curated across
+    // events. Like events, they're folders: media survives the collection.
+    Route::get('/collections', [CollectionController::class, 'index'])->name('collections.index');
+    Route::post('/collections', [CollectionController::class, 'store'])->name('collections.store');
+    Route::get('/collections/{collection}', [CollectionController::class, 'show'])->name('collections.show');
+    Route::patch('/collections/{collection}', [CollectionController::class, 'update'])->name('collections.update');
+    Route::delete('/collections/{collection}', [CollectionController::class, 'destroy'])->name('collections.destroy');
+    Route::post('/collections/{collection}/share', [CollectionController::class, 'share'])->name('collections.share');
+    Route::delete('/collections/{collection}/share', [CollectionController::class, 'unshare'])->name('collections.unshare');
+    // Literal download-all is declared before the media/{media} wildcard so it wins the match.
+    Route::get('/collections/{collection}/media/download-all', [CollectionController::class, 'downloadAllMedia'])->name('collections.media.download-all');
+    Route::post('/collections/{collection}/media', [CollectionController::class, 'attachMedia'])->name('collections.media.attach');
+    Route::delete('/collections/{collection}/media/{media}', [CollectionController::class, 'detachMedia'])->name('collections.media.detach');
 
     // Media — photos and videos. Literal upload/multipart routes are declared
     // before the /media/{media} wildcards so they win the match.

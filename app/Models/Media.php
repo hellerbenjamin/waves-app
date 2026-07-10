@@ -32,6 +32,7 @@ class Media extends Model
     protected $fillable = [
         'user_id',
         'event_id',
+        'collection_id',
         'event_invite_id',
         'contributor_name',
         's3_key',
@@ -64,6 +65,12 @@ class Media extends Model
     public function event(): BelongsTo
     {
         return $this->belongsTo(Event::class);
+    }
+
+    /** The shareable collection this belongs to, if curated into one; independent of its event. */
+    public function collection(): BelongsTo
+    {
+        return $this->belongsTo(Collection::class);
     }
 
     /** The contribution link this was uploaded through, if anonymous; null for owner uploads. */
