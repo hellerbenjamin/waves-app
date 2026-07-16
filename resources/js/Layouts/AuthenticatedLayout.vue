@@ -12,6 +12,7 @@ const userMenu = ref(null);
 const navItems = [
     { label: 'Tracks', icon: 'pi pi-list', command: () => router.visit(route('tracks.index')) },
     { label: 'Events', icon: 'pi pi-calendar', command: () => router.visit(route('events.index')) },
+    { label: 'Collections', icon: 'pi pi-folder', command: () => router.visit(route('collections.index')) },
 ];
 
 const userMenuItems = [

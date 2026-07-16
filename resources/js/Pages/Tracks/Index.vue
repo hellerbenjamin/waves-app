@@ -18,6 +18,7 @@ import ConfirmDialog from 'primevue/confirmdialog';
 import { useConfirm } from 'primevue/useconfirm';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
 import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
+import AddToCollectionMenu from '@/Components/AddToCollectionMenu.vue';
 import { useSplitBeforeUpload } from '@/composables/useSplitBeforeUpload.js';
 import { useStitchedSplit } from '@/composables/useStitchedSplit.js';
 import { useChannelUpload } from '@/composables/useChannelUpload.js';
@@ -312,8 +313,9 @@ const submitRename = async () => {
                                 />
                             </template>
                         </Column>
-                        <Column header="" style="width: 11rem; text-align: right">
+                        <Column header="" style="width: 14rem; text-align: right">
                             <template #body="{ data }">
+                                <AddToCollectionMenu type="track" :ids="[data.id]" text rounded severity="secondary" />
                                 <Button icon="pi pi-pencil" severity="secondary" text rounded aria-label="Rename" @click="openRename(data)" />
                                 <Button icon="pi pi-trash" severity="danger" text rounded aria-label="Delete" @click="confirmDelete(data)" />
                             </template>

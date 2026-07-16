@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\MorphToMany;
 
 class Media extends Model
 {
@@ -12,6 +13,12 @@ class Media extends Model
 
     // Eloquent would otherwise pluralise to "medias".
     protected $table = 'media';
+
+    protected static function booted(): void
+    {
+        // Drop pivot rows so deleted media leaves no orphan collection entries.
+        static::deleting(fn (Media $media) => $media->collections()->detach());
+    }
 
     /**
      * MIME types accepted for upload. Images and the web-playable video
@@ -70,6 +77,12 @@ class Media extends Model
     public function invite(): BelongsTo
     {
         return $this->belongsTo(EventInvite::class, 'event_invite_id');
+    }
+
+    /** Collections this media has been curated into (many-to-many, cross-event). */
+    public function collections(): MorphToMany
+    {
+        return $this->morphToMany(Collection::class, 'collectable', 'collectables');
     }
 
     /** The storage key to stream for playback: the web rendition when ready, else the original. */

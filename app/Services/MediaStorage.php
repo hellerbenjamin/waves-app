@@ -239,8 +239,18 @@ class MediaStorage
     public function zipDownloadResponse(Event $event, string $zipName): StreamedResponse
     {
         // Eager-load so the closure doesn't hit the DB per file.
-        $media = $event->media->all();
+        return $this->zipMediaResponse($event->media->all(), $zipName);
+    }
 
+    /**
+     * Stream an arbitrary set of media items as a single ZIP download — the
+     * event-agnostic core of {@see zipDownloadResponse}, reused for collections
+     * whose media spans multiple events.
+     *
+     * @param  iterable<Media>  $media
+     */
+    public function zipMediaResponse(iterable $media, string $zipName): StreamedResponse
+    {
         return response()->stream(function () use ($media) {
             $zip = new ZipStream(outputStream: fopen('php://output', 'wb'));
 

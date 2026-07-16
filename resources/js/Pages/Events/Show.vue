@@ -26,6 +26,7 @@ import { isOpusEncodeSupported } from '@/lib/opusEncode.js';
 import SplitBeforeUploadDialog from '@/Components/SplitBeforeUploadDialog.vue';
 import StitchedSplitDialog from '@/Components/StitchedSplitDialog.vue';
 import QrPosterDialog from '@/Components/QrPosterDialog.vue';
+import AddToCollectionMenu from '@/Components/AddToCollectionMenu.vue';
 
 const props = defineProps({
     event: { type: Object, required: true },
@@ -443,6 +444,7 @@ const rotateVideo = (direction) => {
                                     <span class="track-num">{{ i + 1 }}</span>
                                     <Link :href="track.show_url" class="track-link">{{ track.name }}</Link>
                                     <span v-if="formatDuration(track.duration_seconds)" class="track-dur">{{ formatDuration(track.duration_seconds) }}</span>
+                                    <AddToCollectionMenu v-if="canEdit" type="track" :ids="[track.id]" text rounded size="small" />
                                     <Button v-if="canEdit" icon="pi pi-times" severity="secondary" text rounded size="small" aria-label="Remove from event" @click="removeTrack(track)" />
                                 </div>
                                 <Tag v-if="!track.ready" severity="warn" value="Processing" />
@@ -494,6 +496,7 @@ const rotateVideo = (direction) => {
                                 <Button icon="pi pi-download" severity="secondary" text rounded size="small" tabindex="-1" />
                             </a>
                             <template v-if="canEdit">
+                                <AddToCollectionMenu type="media" :ids="[item.id]" text rounded size="small" />
                                 <Button icon="pi pi-share-alt" severity="secondary" text rounded size="small" aria-label="Share" @click="shareMedia(item)" />
                                 <Button icon="pi pi-trash" severity="danger" text rounded size="small" aria-label="Delete" @click="confirmDeleteMedia(item)" />
                             </template>
